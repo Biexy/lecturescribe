@@ -13,10 +13,16 @@ type QueueItem = {
   source: string;
   url: string;
   media_path: string;
+  thumbnail_path: string;
   transcript_path: string;
+  markdown_path: string;
+  downloaded_media_path: string;
+  estimated_chunks: number;
+  duplicate_of: string | null;
   selected: boolean;
   status: string;
   error: string | null;
+  fix_action: string | null;
 };
 
 type ToolStatus = {
@@ -40,6 +46,11 @@ type AppSettings = {
   download_dir: string;
   work_dir: string;
   model: string;
+  run_mode: string;
+  transcript_format: string;
+  prompt_preset: string;
+  ffmpeg_path: string;
+  downloader_path: string;
   chunk_minutes: number;
   request_delay_seconds: number;
   cookies_from_browser: string;
@@ -79,11 +90,32 @@ type SetupTestResult = {
   transcript_preview: string;
 };
 
+type QueueFilter = "all" | "selected" | "ready" | "downloading" | "done" | "failed";
+
+type Toast = {
+  id: number;
+  kind: "success" | "warning" | "error" | "info";
+  message: string;
+};
+
+type RunSummary = {
+  title: string;
+  saved: number;
+  failed: number;
+  output: string;
+  duration: string;
+};
+
 const defaultSettings: AppSettings = {
   output_dir: "",
   download_dir: "",
   work_dir: "",
   model: "gemini-3.1-flash-lite",
+  run_mode: "download_transcribe",
+  transcript_format: "txt_markdown",
+  prompt_preset: "default",
+  ffmpeg_path: "",
+  downloader_path: "",
   chunk_minutes: 2,
   request_delay_seconds: 5,
   cookies_from_browser: "",
@@ -103,8 +135,14 @@ const state = {
   previewing: false,
   cancelling: false,
   setupTesting: false,
+  wizardOpen: false,
   settingsOpen: false,
   logsOpen: false,
+  queueFilter: "all" as QueueFilter,
+  queueSearch: "",
+  toasts: [] as Toast[],
+  lastSummary: null as RunSummary | null,
+  runStartedAt: 0,
   settingsMessage: "",
   sourceNotice: "Add links, a .txt file, or local media. The queue updates automatically.",
   previewNotice: "Preview is automatic. If no sources are added, LectureScribe can use Drive links.txt.",
@@ -150,6 +188,7 @@ function icon(name: string): string {
 
 function render() {
   const selected = selectedQueueItems().length;
+  const visibleQueue = filteredQueueItems();
   app.innerHTML = `
     <main class="shell">
       <header class="topbar">
@@ -162,6 +201,7 @@ function render() {
         </div>
         <div class="top-actions">
           ${setupPillsHtml()}
+          <button class="ghost" data-action="open-setup">${icon("shield")} Setup</button>
           <button class="ghost" data-action="open-output">${icon("folder")} Open output</button>
           <button class="ghost" data-action="run-setup-test" ${state.setupTesting || state.running ? "disabled" : ""}>${icon("shield")} Test setup</button>
           <button class="ghost" data-action="open-settings">${icon("gear")} Settings</button>
@@ -179,12 +219,21 @@ function render() {
           <div class="queue-head">
             <div>
               <h2>Queue preview <span>(${state.queue.length} items)</span></h2>
-              <p>${selected} selected${state.previewing ? " - updating preview" : ""}</p>
+              <p>${selected} selected, ${visibleQueue.length} visible${state.previewing ? " - updating preview" : ""}</p>
             </div>
             <div class="queue-actions">
               <button class="small-button secondary" data-action="select-all" ${state.queue.length === 0 || state.running ? "disabled" : ""}>Select all</button>
               <button class="small-button secondary" data-action="select-none" ${state.queue.length === 0 || state.running ? "disabled" : ""}>Select none</button>
               <button class="icon-button" data-action="preview" aria-label="Refresh preview" ${state.previewing || state.running ? "disabled" : ""}>${icon("refresh")}</button>
+            </div>
+          </div>
+          <div class="queue-tools">
+            <label class="search-field">
+              <span>${icon("eye")}</span>
+              <input id="queue-search" value="${escapeHtml(state.queueSearch)}" placeholder="Search queue" aria-label="Search queue" />
+            </label>
+            <div class="filter-tabs" role="tablist" aria-label="Queue filters">
+              ${queueFilterTabsHtml()}
             </div>
           </div>
           <div class="queue-table" aria-live="polite">
@@ -214,9 +263,12 @@ function render() {
         <div class="bar"><div class="bar-fill" style="width: ${safePercent(state.percent)}"></div></div>
         <div class="percent">${escapeHtml(state.percent)}</div>
       </footer>
+      ${summaryPanelHtml()}
+      ${toastStackHtml()}
     </main>
 
     ${pasteDialogHtml()}
+    ${setupWizardHtml()}
     ${settingsDialogHtml()}
   `;
 
@@ -264,6 +316,7 @@ function previewContent(): string {
 }
 
 function startContent(): string {
+  const mode = state.settings.run_mode || "download_transcribe";
   if (state.running) {
     return `
       <button class="wide danger" data-action="cancel" ${state.cancelling ? "disabled" : ""}>${icon("stop")} ${state.cancelling ? "Cancelling..." : "Cancel run"}</button>
@@ -274,12 +327,21 @@ function startContent(): string {
   const hasFailures = failedQueueItems().length > 0;
   const selected = selectedQueueItems().length;
   return `
+    <div class="mode-tabs" role="tablist" aria-label="Run mode">
+      ${runModeButton("download_transcribe", "Download + transcribe", mode)}
+      ${runModeButton("download_only", "Download only", mode)}
+      ${runModeButton("transcribe_existing", "Transcribe media", mode)}
+    </div>
     <button class="wide primary" data-action="start" ${state.previewing || (state.queue.length > 0 && selected === 0) ? "disabled" : ""}>${icon("play")} Start transcription</button>
     <div class="start-actions">
       <button class="small-button secondary" data-action="retry-failed" ${hasFailures ? "" : "disabled"}>${icon("retry")} Retry failed</button>
       <button class="small-button secondary" data-action="open-output">${icon("folder")} Output folder</button>
     </div>
   `;
+}
+
+function runModeButton(value: string, label: string, active: string): string {
+  return `<button type="button" class="mode-tab ${value === active ? "active" : ""}" data-action="set-run-mode" data-run-mode="${value}">${escapeHtml(label)}</button>`;
 }
 
 function setupPillsHtml(): string {
@@ -293,6 +355,56 @@ function setupPillsHtml(): string {
   return `
     <div class="setup-pills" title="${escapeHtml(state.setupNotice || "Setup status")}">
       ${items.map(([label, ok]) => `<span class="setup-pill ${ok ? "ok" : "missing"}">${escapeHtml(label)}</span>`).join("")}
+    </div>
+  `;
+}
+
+function queueFilterTabsHtml(): string {
+  const filters: Array<[QueueFilter, string]> = [
+    ["all", "All"],
+    ["selected", "Selected"],
+    ["ready", "Ready"],
+    ["downloading", "Downloading"],
+    ["done", "Done"],
+    ["failed", "Failed"],
+  ];
+  return filters
+    .map(([value, label]) => `<button type="button" class="filter-tab ${state.queueFilter === value ? "active" : ""}" data-action="set-filter" data-filter="${value}">${label}</button>`)
+    .join("");
+}
+
+function summaryPanelHtml(): string {
+  const summary = state.lastSummary;
+  if (!summary) return "";
+  return `
+    <section class="run-summary" role="status" aria-live="polite">
+      <div>
+        <strong>${escapeHtml(summary.title)}</strong>
+        <span>${summary.saved} saved, ${summary.failed} failed, ${escapeHtml(summary.duration)}</span>
+      </div>
+      <div class="summary-actions">
+        <button class="small-button secondary" data-action="copy-output-path">Copy output path</button>
+        <button class="small-button secondary" data-action="open-output">${icon("folder")} Open folder</button>
+        ${summary.failed ? `<button class="small-button secondary" data-action="retry-failed">${icon("retry")} Retry failed</button>` : ""}
+      </div>
+    </section>
+  `;
+}
+
+function toastStackHtml(): string {
+  if (!state.toasts.length) return "";
+  return `
+    <div class="toast-stack" aria-live="polite">
+      ${state.toasts
+        .map(
+          (toast) => `
+            <div class="toast ${toast.kind}">
+              <span>${escapeHtml(toast.message)}</span>
+              <button type="button" class="remove-button" data-action="dismiss-toast" data-toast-id="${toast.id}" aria-label="Dismiss notification">${icon("close")}</button>
+            </div>
+          `,
+        )
+        .join("")}
     </div>
   `;
 }
@@ -343,6 +455,99 @@ function pasteDialogHtml(): string {
   `;
 }
 
+function setupWizardHtml(): string {
+  const env = state.environment;
+  const output = state.settings.output_dir || env?.default_output_dir || "";
+  return `
+    <dialog id="setup-dialog" class="setup-dialog">
+      <div class="dialog-body setup-body">
+        <div class="settings-header">
+          <div>
+            <h3>LectureScribe setup</h3>
+            <p class="muted">One-time checks for transcription, downloads, and output.</p>
+          </div>
+          <button type="button" class="icon-button" data-action="close-setup" aria-label="Close setup">${icon("close")}</button>
+        </div>
+
+        <div class="wizard-grid">
+          <section class="wizard-card privacy-card">
+            <strong>Local-first</strong>
+            <span>Your files, downloads, transcripts, and cache stay on this computer. Audio chunks are sent to Gemini only when transcription runs.</span>
+          </section>
+
+          <section class="wizard-card">
+            <div class="wizard-step-head">
+              <span class="step-number small">1</span>
+              <div><strong>Gemini API key</strong><span>${env?.api_key_ok ? "Saved securely" : "Required for transcription"}</span></div>
+            </div>
+            <label class="field-stack">
+              <span>API key</span>
+              <div class="inline-field">
+                <input id="setup-api-key-input" type="password" autocomplete="off" placeholder="Paste Gemini API key" />
+                <button type="button" class="compact-button secondary" data-action="save-api-key">${icon("key")} Save</button>
+              </div>
+              <small>Get a key from <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">Google AI Studio</a>. Recommended model: <b>gemini-3.1-flash-lite</b>.</small>
+            </label>
+          </section>
+
+          <section class="wizard-card">
+            <div class="wizard-step-head">
+              <span class="step-number small">2</span>
+              <div><strong>FFmpeg</strong><span>${env?.ffmpeg.ok ? "Ready" : "Required for audio extraction and chunking"}</span></div>
+            </div>
+            <p class="notice-line">${escapeHtml(env?.ffmpeg.detail || "Checking FFmpeg...")}</p>
+            <div class="wizard-actions">
+              <button type="button" class="compact-button secondary" data-action="install-ffmpeg">Install FFmpeg</button>
+              <button type="button" class="compact-button secondary" data-action="choose-ffmpeg">${icon("folder")} Choose FFmpeg</button>
+              <button type="button" class="compact-button secondary" data-action="refresh-environment">${icon("refresh")} Check again</button>
+            </div>
+          </section>
+
+          <section class="wizard-card">
+            <div class="wizard-step-head">
+              <span class="step-number small">3</span>
+              <div><strong>Downloader</strong><span>${env?.yt_dlp.ok ? "Ready for YouTube and Drive links" : "Needed only for link downloads"}</span></div>
+            </div>
+            <p class="notice-line">${escapeHtml(env?.yt_dlp.detail || "Bundled or app-managed yt-dlp is checked here.")}</p>
+            <div class="wizard-actions">
+              <button type="button" class="compact-button secondary" data-action="install-downloader">Install downloader</button>
+              <button type="button" class="compact-button secondary" data-action="update-downloader">Update downloader</button>
+              <button type="button" class="compact-button secondary" data-action="choose-downloader">${icon("folder")} Choose downloader</button>
+              <button type="button" class="compact-button secondary" data-action="refresh-environment">${icon("refresh")} Check again</button>
+            </div>
+            <small class="muted">Technical name: yt-dlp. Default app path: %LOCALAPPDATA%\\LectureScribe\\tools\\yt-dlp.exe</small>
+          </section>
+
+          <section class="wizard-card">
+            <div class="wizard-step-head">
+              <span class="step-number small">4</span>
+              <div><strong>Output folder</strong><span>${escapeHtml(shortName(output) || "Choose where transcripts are saved")}</span></div>
+            </div>
+            ${pathField("Output folder", "output_dir", output, "Transcripts, Markdown files, and 00_index.md are saved here.")}
+          </section>
+
+          <section class="wizard-card">
+            <div class="wizard-step-head">
+              <span class="step-number small">5</span>
+              <div><strong>Test setup</strong><span>Uses one tiny Gemini request</span></div>
+            </div>
+            <button type="button" class="compact-button primary" data-action="run-setup-test" ${state.setupTesting || state.running ? "disabled" : ""}>${icon("shield")} Test setup</button>
+            <p class="notice-line">${escapeHtml(state.setupNotice || "Confirms the API key, FFmpeg, and the audio request path.")}</p>
+          </section>
+        </div>
+
+        <div class="settings-footer">
+          <span class="settings-message">${escapeHtml(state.settingsMessage)}</span>
+          <div class="dialog-actions">
+            <button type="button" class="compact-button secondary" data-action="close-setup">Close</button>
+            <button type="button" class="compact-button primary" data-action="save-settings">${icon("check")} Save setup</button>
+          </div>
+        </div>
+      </div>
+    </dialog>
+  `;
+}
+
 function settingsDialogHtml(): string {
   const s = state.settings;
   return `
@@ -351,7 +556,7 @@ function settingsDialogHtml(): string {
         <div class="settings-header">
           <div>
             <h3>Settings</h3>
-            <p class="muted">Setup, folders, model, private download options, and logs.</p>
+            <p class="muted">Setup, folders, model, private download options, history, and logs.</p>
           </div>
           <button type="button" class="icon-button" data-action="close-settings" aria-label="Close settings">${icon("close")}</button>
         </div>
@@ -375,8 +580,20 @@ function settingsDialogHtml(): string {
                 <input id="api-key-input" type="password" autocomplete="off" placeholder="Paste key to save locally" />
                 <button type="button" class="compact-button secondary" data-action="save-api-key">${icon("key")} Save</button>
               </div>
-              <small>Stored locally in .env. Existing keys are never shown here.</small>
+              <small>Saved in the OS secure credential store. Existing keys are never shown here.</small>
             </label>
+          </section>
+
+          <section class="settings-section span-2">
+            <h4>Tools</h4>
+            <div class="tool-grid">${toolStatusHtml()}</div>
+            <div class="wizard-actions">
+              <button type="button" class="compact-button secondary" data-action="install-downloader">Install downloader</button>
+              <button type="button" class="compact-button secondary" data-action="update-downloader">Update downloader</button>
+              <button type="button" class="compact-button secondary" data-action="choose-downloader">Choose downloader</button>
+              <button type="button" class="compact-button secondary" data-action="install-ffmpeg">Install FFmpeg</button>
+              <button type="button" class="compact-button secondary" data-action="choose-ffmpeg">Choose FFmpeg</button>
+            </div>
           </section>
 
           <section class="settings-section span-2">
@@ -388,6 +605,14 @@ function settingsDialogHtml(): string {
 
           <section class="settings-section">
             <h4>Transcription</h4>
+            <label class="field-stack">
+              <span>Run mode</span>
+              <select data-setting="run_mode">
+                <option value="download_transcribe" ${s.run_mode === "download_transcribe" ? "selected" : ""}>Download + transcribe</option>
+                <option value="download_only" ${s.run_mode === "download_only" ? "selected" : ""}>Download only</option>
+                <option value="transcribe_existing" ${s.run_mode === "transcribe_existing" ? "selected" : ""}>Transcribe existing media</option>
+              </select>
+            </label>
             <label class="field-stack">
               <span>Model <strong class="recommended-label">Recommended</strong></span>
               <input data-setting="model" value="${escapeHtml(s.model)}" />
@@ -403,6 +628,15 @@ function settingsDialogHtml(): string {
                 <input data-setting="request_delay_seconds" type="number" min="0" max="120" step="0.5" value="${escapeHtml(String(s.request_delay_seconds))}" />
               </label>
             </div>
+            <label class="field-stack">
+              <span>Prompt preset</span>
+              <select data-setting="prompt_preset">
+                <option value="default" ${s.prompt_preset === "default" ? "selected" : ""}>Default lecture</option>
+                <option value="arabic_lecture" ${s.prompt_preset === "arabic_lecture" ? "selected" : ""}>Arabic lecture</option>
+                <option value="english_lecture" ${s.prompt_preset === "english_lecture" ? "selected" : ""}>English lecture</option>
+                <option value="technical_math" ${s.prompt_preset === "technical_math" ? "selected" : ""}>Technical/math lecture</option>
+              </select>
+            </label>
             <label class="check-row">
               <input data-setting="skip_download" type="checkbox" ${s.skip_download ? "checked" : ""} />
               <span>Skip download and use existing media only</span>
@@ -431,9 +665,18 @@ function settingsDialogHtml(): string {
 
           <section class="settings-section span-2">
             <div class="section-head">
+              <h4>History</h4>
+              <button type="button" class="text-button" data-action="clear-history">Clear history</button>
+            </div>
+            ${historyHtml()}
+          </section>
+
+          <section class="settings-section span-2">
+            <div class="section-head">
               <h4>Activity logs</h4>
               <div class="section-actions">
                 <button type="button" class="text-button" data-action="toggle-logs">${state.logsOpen ? "Hide logs" : "Show logs"}</button>
+                <button type="button" class="text-button" data-action="export-bug-report">Export bug report</button>
                 <button type="button" class="text-button" data-action="clear-logs">Clear</button>
               </div>
             </div>
@@ -477,11 +720,22 @@ function queueRowsHtml(): string {
     `;
   }
 
-  return state.queue
+  const rows = filteredQueueItems();
+  if (!rows.length) {
+    return `
+      <div class="empty-state">
+        <strong>No matching items</strong>
+        <span>Clear the search box or switch queue filters.</span>
+      </div>
+    `;
+  }
+
+  return rows
     .map((item) => {
       const source = item.url || item.source;
       const statusClass = statusClassName(item.status);
       const canOpen = Boolean(item.transcript_path && item.status.toLowerCase() === "done");
+      const canReveal = Boolean(item.downloaded_media_path || item.media_path);
       return `
         <div class="queue-row ${item.selected ? "selected" : ""}">
           <div class="select-cell"><input type="checkbox" aria-label="Select ${escapeHtml(item.title)}" data-action="toggle-queue" data-id="${escapeHtml(item.id)}" ${item.selected ? "checked" : ""} ${state.running ? "disabled" : ""} /></div>
@@ -494,7 +748,9 @@ function queueRowsHtml(): string {
           <div class="truncate" title="${escapeHtml(item.media_path)}">${escapeHtml(shortName(item.media_path) || "After download")}</div>
           <div class="status-cell">
             <span class="status-pill ${statusClass}">${escapeHtml(item.status)}</span>
-            ${canOpen ? `<button class="row-action" data-action="open-transcript" data-path="${escapeHtml(item.transcript_path)}">${icon("open")} Open</button>` : ""}
+            ${canOpen ? `<button class="row-action" data-action="open-transcript" data-path="${escapeHtml(item.transcript_path)}" title="Open TXT transcript">${icon("open")}</button>` : ""}
+            ${canOpen && item.markdown_path ? `<button class="row-action" data-action="open-transcript" data-path="${escapeHtml(item.markdown_path)}" title="Open Markdown transcript">MD</button>` : ""}
+            ${canReveal ? `<button class="row-action" data-action="reveal-media" data-path="${escapeHtml(item.downloaded_media_path || item.media_path)}" title="Reveal media">${icon("folder")}</button>` : ""}
           </div>
         </div>
       `;
@@ -543,7 +799,7 @@ function toolStatusHtml(): string {
   const api: ToolStatus = {
     name: "API key",
     ok: env.api_key_ok,
-    detail: env.api_key_ok ? "Saved locally" : "Open Settings and save a Gemini key",
+    detail: env.api_key_ok ? "Saved in secure credential store" : "Open Setup and save a Gemini key",
   };
 
   return [api, env.ffmpeg, env.yt_dlp, env.native_engine]
@@ -563,6 +819,33 @@ function logPanelHtml(): string {
   return `<pre class="logs">${state.logs.map(escapeHtml).join("\n")}</pre>`;
 }
 
+function historyHtml(): string {
+  let history: Array<{ date: string; title: string; saved: number; failed: number; output: string; duration: string }> = [];
+  try {
+    history = JSON.parse(localStorage.getItem("lecturescribe.history") || "[]");
+  } catch {
+    history = [];
+  }
+  if (!history.length) return `<p class="muted">Recent completed batches will appear here.</p>`;
+  return `
+    <div class="history-list">
+      ${history
+        .map(
+          (item, index) => `
+            <div class="history-row">
+              <div>
+                <strong>${escapeHtml(item.title)}</strong>
+                <span>${escapeHtml(new Date(item.date).toLocaleString())} - ${item.saved} saved, ${item.failed} failed, ${escapeHtml(item.duration)}</span>
+              </div>
+              <button type="button" class="row-action" data-action="open-history-output" data-history-index="${index}" title="${escapeHtml(item.output)}">${icon("folder")}</button>
+            </div>
+          `,
+        )
+        .join("")}
+    </div>
+  `;
+}
+
 function wireEvents() {
   document.querySelector('[data-action="paste"]')?.addEventListener("click", () => {
     (document.querySelector("#paste-dialog") as HTMLDialogElement).showModal();
@@ -577,16 +860,47 @@ function wireEvents() {
   document.querySelector('[data-action="start"]')?.addEventListener("click", () => void startTranscription());
   document.querySelector('[data-action="cancel"]')?.addEventListener("click", () => void cancelTranscription());
   document.querySelector('[data-action="retry-failed"]')?.addEventListener("click", () => void retryFailedItems());
+  document.querySelector('[data-action="open-setup"]')?.addEventListener("click", openSetup);
+  document.querySelectorAll('[data-action="close-setup"]').forEach((button) => button.addEventListener("click", closeSetup));
   document.querySelector('[data-action="open-settings"]')?.addEventListener("click", openSettings);
   document.querySelectorAll('[data-action="close-settings"]').forEach((button) => button.addEventListener("click", closeSettings));
   document.querySelectorAll('[data-action="open-output"]').forEach((button) => button.addEventListener("click", () => void openOutputFolder()));
   document.querySelectorAll('[data-action="run-setup-test"]').forEach((button) => button.addEventListener("click", () => void runSetupTest()));
-  document.querySelector('[data-action="save-api-key"]')?.addEventListener("click", () => void saveApiKeyFromDialog());
-  document.querySelector('[data-action="refresh-environment"]')?.addEventListener("click", () => void loadEnvironment());
+  document.querySelectorAll('[data-action="save-api-key"]').forEach((button) => button.addEventListener("click", () => void saveApiKeyFromDialog()));
+  document.querySelectorAll('[data-action="save-settings"]').forEach((button) => button.addEventListener("click", () => void saveAppSettings(true)));
+  document.querySelectorAll('[data-action="install-downloader"]').forEach((button) => button.addEventListener("click", () => void installDownloader()));
+  document.querySelectorAll('[data-action="update-downloader"]').forEach((button) => button.addEventListener("click", () => void installDownloader(true)));
+  document.querySelectorAll('[data-action="choose-downloader"]').forEach((button) => button.addEventListener("click", () => void chooseDownloader()));
+  document.querySelectorAll('[data-action="install-ffmpeg"]').forEach((button) => button.addEventListener("click", () => void installFfmpeg()));
+  document.querySelectorAll('[data-action="choose-ffmpeg"]').forEach((button) => button.addEventListener("click", () => void chooseFfmpeg()));
+  document.querySelectorAll('[data-action="refresh-environment"]').forEach((button) => button.addEventListener("click", () => void loadEnvironment()));
+  document.querySelector("#queue-search")?.addEventListener("input", (event) => {
+    state.queueSearch = (event.currentTarget as HTMLInputElement).value;
+    render();
+  });
+  document.querySelectorAll('[data-action="set-filter"]').forEach((button) => {
+    button.addEventListener("click", () => {
+      state.queueFilter = ((button as HTMLElement).dataset.filter as QueueFilter) || "all";
+      render();
+    });
+  });
+  document.querySelectorAll('[data-action="set-run-mode"]').forEach((button) => {
+    button.addEventListener("click", () => {
+      state.settings.run_mode = (button as HTMLElement).dataset.runMode || "download_transcribe";
+      state.settings.skip_download = state.settings.run_mode === "transcribe_existing";
+      render();
+    });
+  });
   document.querySelector('[data-action="clear-logs"]')?.addEventListener("click", () => {
     state.logs = [];
     render();
   });
+  document.querySelector('[data-action="clear-history"]')?.addEventListener("click", () => {
+    localStorage.removeItem("lecturescribe.history");
+    toast("info", "History cleared.");
+    render();
+  });
+  document.querySelector('[data-action="export-bug-report"]')?.addEventListener("click", () => void exportBugReport());
   document.querySelector('[data-action="toggle-logs"]')?.addEventListener("click", () => {
     state.logsOpen = !state.logsOpen;
     render();
@@ -601,16 +915,25 @@ function wireEvents() {
     render();
   });
   document.querySelector('[data-action="select-all"]')?.addEventListener("click", () => {
-    state.queue.forEach((item) => (item.selected = true));
+    const visible = new Set(filteredQueueItems().map((item) => item.id));
+    state.queue.forEach((item) => {
+      if (visible.has(item.id)) item.selected = true;
+    });
     render();
   });
   document.querySelector('[data-action="select-none"]')?.addEventListener("click", () => {
-    state.queue.forEach((item) => (item.selected = false));
+    const visible = new Set(filteredQueueItems().map((item) => item.id));
+    state.queue.forEach((item) => {
+      if (visible.has(item.id)) item.selected = false;
+    });
     render();
   });
   document.querySelector('[data-action="select-all-checkbox"]')?.addEventListener("change", (event) => {
     const checked = (event.currentTarget as HTMLInputElement).checked;
-    state.queue.forEach((item) => (item.selected = checked));
+    const visible = new Set(filteredQueueItems().map((item) => item.id));
+    state.queue.forEach((item) => {
+      if (visible.has(item.id)) item.selected = checked;
+    });
     render();
   });
   document.querySelectorAll('[data-action="toggle-queue"]').forEach((input) => {
@@ -624,12 +947,31 @@ function wireEvents() {
   document.querySelectorAll('[data-action="open-transcript"]').forEach((button) => {
     button.addEventListener("click", () => void openTranscript((button as HTMLElement).dataset.path ?? ""));
   });
+  document.querySelectorAll('[data-action="reveal-media"]').forEach((button) => {
+    button.addEventListener("click", () => void revealMedia((button as HTMLElement).dataset.path ?? ""));
+  });
+  document.querySelectorAll('[data-action="copy-output-path"]').forEach((button) => {
+    button.addEventListener("click", () => void copyOutputPath());
+  });
+  document.querySelectorAll('[data-action="open-history-output"]').forEach((button) => {
+    button.addEventListener("click", () => {
+      const index = Number((button as HTMLElement).dataset.historyIndex);
+      void openHistoryOutput(index);
+    });
+  });
+  document.querySelectorAll('[data-action="dismiss-toast"]').forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = Number((button as HTMLElement).dataset.toastId);
+      state.toasts = state.toasts.filter((toast) => toast.id !== id);
+      render();
+    });
+  });
   document.querySelectorAll('[data-action="choose-folder"]').forEach((button) => {
     button.addEventListener("click", () => void chooseFolder((button as HTMLElement).dataset.settingPath));
   });
   document.querySelector('[data-action="choose-cookie-file"]')?.addEventListener("click", () => void chooseCookieFile());
   document.querySelector("#settings-form")?.addEventListener("submit", saveAppSettingsFromForm);
-  document.querySelectorAll<HTMLInputElement>("[data-setting]").forEach((input) => {
+  document.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-setting]").forEach((input) => {
     input.addEventListener("input", () => updateSettingFromInput(input));
     input.addEventListener("change", () => updateSettingFromInput(input));
   });
@@ -655,11 +997,25 @@ function wireEvents() {
     });
     settingsDialog.showModal();
   }
+
+  const setupDialog = document.querySelector<HTMLDialogElement>("#setup-dialog");
+  if (setupDialog && state.wizardOpen && !setupDialog.open) {
+    setupDialog.addEventListener("close", () => {
+      if (state.wizardOpen) {
+        state.wizardOpen = false;
+        render();
+      }
+    });
+    setupDialog.showModal();
+  }
 }
 
 async function loadEnvironment() {
   try {
     state.environment = await invoke<EnvironmentStatus>("check_environment");
+    if (isTauriRuntime() && setupNeedsAttention() && !state.settingsOpen && !state.running) {
+      state.wizardOpen = true;
+    }
   } catch (error) {
     const message = friendlyError("Desktop bridge unavailable", error);
     state.settingsMessage = message;
@@ -781,13 +1137,15 @@ async function startTranscription() {
     return;
   }
 
-  const apiReady = await invoke<boolean>("api_key_ready");
-  if (!apiReady) {
-    showApiDialog();
-    return;
+  await loadEnvironmentWithoutRender();
+  if (state.settings.run_mode !== "download_only") {
+    const apiReady = await invoke<boolean>("api_key_ready");
+    if (!apiReady) {
+      showApiDialog();
+      return;
+    }
   }
 
-  await loadEnvironmentWithoutRender();
   const setupError = firstBlockingSetupError(selected);
   if (setupError) {
     state.current = setupError;
@@ -803,6 +1161,8 @@ async function startTranscription() {
   state.phase = "Starting";
   state.current = "Launching native engine...";
   state.logs = [];
+  state.lastSummary = null;
+  state.runStartedAt = Date.now();
   state.completedItems = 0;
   state.currentItem = 0;
   state.speed = "0 KB/s";
@@ -931,9 +1291,83 @@ async function openTranscript(path: string) {
   }
 }
 
+async function revealMedia(path: string) {
+  if (!path) return;
+  try {
+    await invoke("reveal_media", { path });
+  } catch (error) {
+    state.current = String(error);
+    render();
+  }
+}
+
+async function copyOutputPath() {
+  const output = state.settings.output_dir || state.environment?.default_output_dir || "";
+  if (!output) return;
+  try {
+    await navigator.clipboard.writeText(output);
+    toast("success", "Output path copied.");
+  } catch {
+    toast("warning", "Could not copy output path.");
+  }
+  render();
+}
+
+async function openHistoryOutput(index: number) {
+  try {
+    const history = JSON.parse(localStorage.getItem("lecturescribe.history") || "[]");
+    const item = history[index];
+    if (item?.output) await invoke("open_output_folder", { path: item.output });
+  } catch (error) {
+    state.current = String(error);
+    render();
+  }
+}
+
+async function exportBugReport() {
+  const safeSettings = {
+    ...state.settings,
+    cookies_file: state.settings.cookies_file ? "[set]" : "",
+    cookies_from_browser: state.settings.cookies_from_browser ? "[set]" : "",
+    downloader_path: state.settings.downloader_path ? "[set]" : "",
+    ffmpeg_path: state.settings.ffmpeg_path ? "[set]" : "",
+  };
+  const report = [
+    "LectureScribe diagnostic report",
+    `Generated: ${new Date().toISOString()}`,
+    "",
+    "Setup:",
+    JSON.stringify(state.environment, null, 2),
+    "",
+    "Settings (sanitized):",
+    JSON.stringify(safeSettings, null, 2),
+    "",
+    "Recent logs:",
+    state.logs.slice(-80).join("\n") || "(none)",
+  ].join("\n");
+  try {
+    await navigator.clipboard.writeText(report);
+    toast("success", "Sanitized bug report copied.");
+  } catch {
+    toast("warning", "Could not copy bug report.");
+  }
+  render();
+}
+
 function openSettings() {
   state.settingsOpen = true;
   state.settingsMessage = "";
+  render();
+}
+
+function openSetup() {
+  state.wizardOpen = true;
+  state.settingsMessage = "";
+  render();
+}
+
+function closeSetup() {
+  state.wizardOpen = false;
   render();
 }
 
@@ -964,7 +1398,69 @@ async function chooseCookieFile() {
   render();
 }
 
-function updateSettingFromInput(input: HTMLInputElement) {
+async function chooseDownloader() {
+  const selected = await open({ multiple: false, directory: false, filters: [{ name: "Downloader", extensions: ["exe"] }] });
+  const [path] = normalizeSelection(selected);
+  if (!path) return;
+  try {
+    state.settings = await invoke<AppSettings>("choose_downloader", { path });
+    state.settingsMessage = "Downloader path saved.";
+    toast("success", "Downloader path saved.");
+    await loadEnvironmentWithoutRender();
+  } catch (error) {
+    state.settingsMessage = friendlyError("Could not choose downloader", error);
+    toast("error", state.settingsMessage);
+  }
+  render();
+}
+
+async function chooseFfmpeg() {
+  const selected = await open({ multiple: false, directory: false, filters: [{ name: "FFmpeg", extensions: ["exe"] }] });
+  const [path] = normalizeSelection(selected);
+  if (!path) return;
+  try {
+    state.settings = await invoke<AppSettings>("choose_ffmpeg", { path });
+    state.settingsMessage = "FFmpeg path saved.";
+    toast("success", "FFmpeg path saved.");
+    await loadEnvironmentWithoutRender();
+  } catch (error) {
+    state.settingsMessage = friendlyError("Could not choose FFmpeg", error);
+    toast("error", state.settingsMessage);
+  }
+  render();
+}
+
+async function installDownloader(update = false) {
+  state.settingsMessage = update ? "Updating downloader..." : "Installing downloader...";
+  render();
+  try {
+    await invoke<ToolStatus>(update ? "update_downloader" : "install_downloader");
+    state.settingsMessage = update ? "Downloader updated." : "Downloader installed.";
+    toast("success", state.settingsMessage);
+    await loadEnvironmentWithoutRender();
+  } catch (error) {
+    state.settingsMessage = friendlyError("Downloader setup failed", error);
+    toast("error", state.settingsMessage);
+  }
+  render();
+}
+
+async function installFfmpeg() {
+  state.settingsMessage = "Starting FFmpeg install with winget...";
+  render();
+  try {
+    await invoke<ToolStatus>("install_ffmpeg");
+    state.settingsMessage = "FFmpeg installed.";
+    toast("success", "FFmpeg installed.");
+    await loadEnvironmentWithoutRender();
+  } catch (error) {
+    state.settingsMessage = friendlyError("FFmpeg install failed", error);
+    toast("warning", state.settingsMessage);
+  }
+  render();
+}
+
+function updateSettingFromInput(input: HTMLInputElement | HTMLSelectElement) {
   const key = input.dataset.setting;
   if (!key) return;
 
@@ -972,12 +1468,18 @@ function updateSettingFromInput(input: HTMLInputElement) {
   if (key === "download_dir") state.settings.download_dir = input.value;
   if (key === "work_dir") state.settings.work_dir = input.value;
   if (key === "model") state.settings.model = input.value;
+  if (key === "run_mode") {
+    state.settings.run_mode = input.value;
+    state.settings.skip_download = input.value === "transcribe_existing";
+  }
+  if (key === "prompt_preset") state.settings.prompt_preset = input.value;
+  if (key === "transcript_format") state.settings.transcript_format = input.value;
   if (key === "cookies_from_browser") state.settings.cookies_from_browser = input.value;
   if (key === "cookies_file") state.settings.cookies_file = input.value;
   if (key === "chunk_minutes") state.settings.chunk_minutes = Math.max(1, Math.min(30, Number(input.value) || 2));
   if (key === "request_delay_seconds") state.settings.request_delay_seconds = Math.max(0, Math.min(120, Number(input.value) || 0));
-  if (key === "skip_download") state.settings.skip_download = input.checked;
-  if (key === "force") state.settings.force = input.checked;
+  if (input instanceof HTMLInputElement && key === "skip_download") state.settings.skip_download = input.checked;
+  if (input instanceof HTMLInputElement && key === "force") state.settings.force = input.checked;
 }
 
 async function saveAppSettingsFromForm(event: Event) {
@@ -998,7 +1500,11 @@ async function saveAppSettings(showMessage: boolean) {
 }
 
 async function saveApiKeyFromDialog() {
-  const input = document.querySelector<HTMLInputElement>("#api-key-input");
+  const input =
+    document.querySelector<HTMLInputElement>("#setup-dialog[open] #setup-api-key-input") ??
+    document.querySelector<HTMLInputElement>("#settings-dialog[open] #api-key-input") ??
+    document.querySelector<HTMLInputElement>("#setup-api-key-input") ??
+    document.querySelector<HTMLInputElement>("#api-key-input");
   const apiKey = input?.value.trim() ?? "";
   if (!apiKey) {
     state.settingsMessage = "Paste a Gemini API key first.";
@@ -1018,7 +1524,7 @@ async function saveApiKeyFromDialog() {
 }
 
 function syncSettingsFromForm() {
-  document.querySelectorAll<HTMLInputElement>("[data-setting]").forEach(updateSettingFromInput);
+  document.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-setting]").forEach(updateSettingFromInput);
 }
 
 async function loadEnvironmentWithoutRender() {
@@ -1027,6 +1533,12 @@ async function loadEnvironmentWithoutRender() {
   } catch (error) {
     state.settingsMessage = String(error);
   }
+}
+
+function setupNeedsAttention(): boolean {
+  const env = state.environment;
+  if (!env) return false;
+  return !env.api_key_ok || !env.ffmpeg.ok || !env.yt_dlp.ok;
 }
 
 async function setupEngineEvents() {
@@ -1153,15 +1665,35 @@ function handleEngineLine(line: string) {
 function handleEngineDone(done: EngineDone) {
   state.running = false;
   state.cancelling = false;
+  const duration = formatDuration(Date.now() - (state.runStartedAt || Date.now()));
+  const saved = state.queue.filter((item) => item.status.toLowerCase() === "done").length;
+  const failed = failedQueueItems().length;
   if (!done.success) {
     if (state.phase !== "Cancelled") state.phase = "Needs attention";
     if (!state.current || state.current === "Launching native engine...") {
       state.current = `Engine exited with code ${done.code ?? "unknown"}`;
     }
+    state.lastSummary = {
+      title: state.phase === "Cancelled" ? "Run cancelled" : "Run needs attention",
+      saved,
+      failed,
+      output: state.settings.output_dir,
+      duration,
+    };
+    toast(state.phase === "Cancelled" ? "warning" : "error", state.current);
   } else {
     state.phase = "Complete";
     state.current = "Transcription run complete";
     state.percent = "100%";
+    state.lastSummary = {
+      title: state.settings.run_mode === "download_only" ? "Download complete" : "Transcription complete",
+      saved: state.settings.run_mode === "download_only" ? state.activeRunIds.length : Math.max(saved, state.completedItems),
+      failed,
+      output: state.settings.output_dir,
+      duration,
+    };
+    toast("success", `${state.lastSummary.title}: ${state.lastSummary.saved} item${state.lastSummary.saved === 1 ? "" : "s"}.`);
+    saveHistory(state.lastSummary);
   }
   void loadEnvironmentWithoutRender();
   render();
@@ -1202,8 +1734,29 @@ function selectedQueueItems(): QueueItem[] {
   return state.queue.filter((item) => item.selected);
 }
 
+function filteredQueueItems(): QueueItem[] {
+  const query = state.queueSearch.trim().toLowerCase();
+  return state.queue.filter((item) => {
+    const status = item.status.toLowerCase();
+    const matchesFilter =
+      state.queueFilter === "all" ||
+      (state.queueFilter === "selected" && item.selected) ||
+      (state.queueFilter === "ready" && ["ready", "will download", "queued"].includes(status)) ||
+      (state.queueFilter === "downloading" && ["downloading", "running", "transcribing"].includes(status)) ||
+      (state.queueFilter === "done" && status === "done") ||
+      (state.queueFilter === "failed" && failedStatus(status));
+    if (!matchesFilter) return false;
+    if (!query) return true;
+    return [item.title, item.url, item.source, item.media_path, item.status].some((value) => value.toLowerCase().includes(query));
+  });
+}
+
 function failedQueueItems(): QueueItem[] {
-  return state.queue.filter((item) => ["failed", "needs review", "needs attention"].includes(item.status.toLowerCase()));
+  return state.queue.filter((item) => failedStatus(item.status.toLowerCase()));
+}
+
+function failedStatus(status: string): boolean {
+  return ["failed", "needs review", "needs attention"].includes(status);
 }
 
 function addSource(source: SourceEntry): boolean {
@@ -1250,10 +1803,13 @@ async function countLinksForFile(path: string): Promise<number> {
 function firstBlockingSetupError(selected: QueueItem[]): string {
   const env = state.environment;
   if (!env) return "";
-  if (!env.ffmpeg.ok) return "FFmpeg is missing. Install FFmpeg and refresh setup before starting.";
+  const mode = state.settings.run_mode || "download_transcribe";
+  const needsTranscription = mode !== "download_only";
+  if (needsTranscription && !env.ffmpeg.ok) return "FFmpeg is missing. Install FFmpeg or choose ffmpeg.exe in Setup before transcription.";
   const hasLink = selected.some((item) => item.source_type === "link" || Boolean(item.url));
-  if (hasLink && !state.settings.skip_download && !env.yt_dlp.ok) {
-    return "yt-dlp is missing. Add yt-dlp.exe beside the app or install yt-dlp before downloading links.";
+  const needsDownloader = hasLink && mode !== "transcribe_existing";
+  if (needsDownloader && !env.yt_dlp.ok) {
+    return "Downloader is missing. Install or update it in Setup before using links.";
   }
   return "";
 }
@@ -1275,7 +1831,7 @@ function showApiDialog(message = "LectureScribe needs a Gemini API key before it
       </div>
       <div class="api-callout">
         <strong>Recommended model: gemini-3.1-flash-lite</strong>
-        <span>Bring your own key from AI Studio. It stays on this computer in the local .env file.</span>
+        <span>Bring your own key from AI Studio. It stays on this computer in the OS secure credential store.</span>
       </div>
       <div class="dialog-actions">
         <button type="button" class="compact-button secondary" data-action="close-api">Later</button>
@@ -1316,7 +1872,9 @@ function parsePastedSources(text: string): SourceEntry[] {
   const paths = lines.filter((line) => !isUrl(line) && looksLikeMediaPath(line));
   const entries: SourceEntry[] = [];
 
-  if (urls.length) entries.push({ kind: "pasted", value: urls.join("\n"), label: `${urls.length} pasted link${urls.length === 1 ? "" : "s"}`, count: urls.length });
+  for (const url of urls) {
+    entries.push({ kind: "pasted", value: url, label: shortUrlLabel(url), count: 1 });
+  }
   for (const path of paths) entries.push({ kind: "media", value: path, label: fileLabel(path), count: 1 });
 
   return entries;
@@ -1325,6 +1883,48 @@ function parsePastedSources(text: string): SourceEntry[] {
 function duplicateHintCount(): number {
   const sourceValues = state.sources.map((source) => normalizeSourceValue(source.value));
   return sourceValues.length - new Set(sourceValues).size;
+}
+
+function toast(kind: Toast["kind"], message: string) {
+  const id = Date.now() + Math.floor(Math.random() * 1000);
+  state.toasts = [...state.toasts, { id, kind, message }].slice(-4);
+  window.setTimeout(() => {
+    state.toasts = state.toasts.filter((candidate) => candidate.id !== id);
+    render();
+  }, 4500);
+}
+
+function saveHistory(summary: RunSummary) {
+  try {
+    const raw = localStorage.getItem("lecturescribe.history");
+    const history = raw ? JSON.parse(raw) : [];
+    const next = [
+      {
+        date: new Date().toISOString(),
+        title: summary.title,
+        saved: summary.saved,
+        failed: summary.failed,
+        output: summary.output,
+        duration: summary.duration,
+      },
+      ...history,
+    ].slice(0, 12);
+    localStorage.setItem("lecturescribe.history", JSON.stringify(next));
+  } catch {
+    // History is a convenience feature; failure should not interrupt transcription.
+  }
+}
+
+function formatDuration(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return minutes ? `${minutes}m ${rest}s` : `${rest}s`;
+}
+
+function shortUrlLabel(url: string): string {
+  if (url.length <= 58) return url;
+  return `${url.slice(0, 34)}...${url.slice(-16)}`;
 }
 
 function statusClassName(status: string): string {

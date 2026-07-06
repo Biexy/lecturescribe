@@ -52,6 +52,7 @@ body {
 
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
@@ -62,6 +63,7 @@ button {
 }
 
 input,
+select,
 textarea {
   min-width: 0;
   border: 1px solid var(--border);
@@ -72,6 +74,12 @@ textarea {
 }
 
 input {
+  height: 38px;
+  padding: 0 11px;
+  font-size: 13.5px;
+}
+
+select {
   height: 38px;
   padding: 0 11px;
   font-size: 13.5px;
@@ -106,6 +114,7 @@ svg {
 
 button:focus-visible,
 input:focus-visible,
+select:focus-visible,
 textarea:focus-visible {
   outline: 3px solid rgba(29, 99, 239, 0.24);
   outline-offset: 2px;
@@ -117,16 +126,16 @@ button:disabled {
 }
 
 .shell {
-  width: min(1460px, calc(100vw - 24px));
-  height: calc(100vh - 24px);
-  margin: 12px auto;
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
   display: grid;
   grid-template-rows: 68px minmax(0, 1fr) 76px;
   overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-window);
+  border: 0;
+  border-radius: 0;
   background: rgba(255, 255, 255, 0.97);
-  box-shadow: var(--shadow-window);
+  box-shadow: none;
 }
 
 .topbar {
@@ -147,12 +156,14 @@ button:disabled {
 .helper.with-icon,
 .settings-header,
 .settings-footer,
+.wizard-step-head,
 .section-head,
 .section-actions,
 .source-tools,
 .dialog-actions,
 .dialog-title,
 .queue-actions,
+.queue-tools,
 .status-cell,
 .start-actions {
   display: flex;
@@ -658,7 +669,7 @@ button:disabled {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: 56px minmax(0, 1fr);
+  grid-template-rows: 56px 42px minmax(0, 1fr);
   padding: 12px;
 }
 
@@ -673,6 +684,72 @@ button:disabled {
 .queue-actions {
   justify-content: flex-end;
   gap: 8px;
+}
+
+.queue-tools {
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 2px 8px 4px;
+}
+
+.search-field {
+  min-width: 220px;
+  max-width: 360px;
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.search-field input {
+  height: 34px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.filter-tabs,
+.mode-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+}
+
+.filter-tab,
+.mode-tab {
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 6px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 720;
+}
+
+.filter-tab.active,
+.mode-tab.active {
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 2px 7px rgba(15, 23, 42, 0.07);
+}
+
+.mode-tabs {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin-bottom: 9px;
 }
 
 .icon-button {
@@ -701,7 +778,7 @@ button:disabled {
 
 .queue-row {
   display: grid;
-  grid-template-columns: 42px minmax(170px, 1.06fr) minmax(220px, 1.45fr) minmax(160px, 1fr) 182px;
+  grid-template-columns: 42px minmax(170px, 1.06fr) minmax(220px, 1.45fr) minmax(160px, 1fr) 154px;
   align-items: center;
   min-height: 44px;
   border-bottom: 1px solid var(--border-soft);
@@ -770,7 +847,7 @@ button:disabled {
 }
 
 .status-pill {
-  min-width: 78px;
+  min-width: 74px;
   height: 27px;
   display: inline-flex;
   align-items: center;
@@ -794,6 +871,11 @@ button:disabled {
   color: var(--danger);
   background: var(--danger-bg);
   border-color: var(--danger-border);
+}
+
+.row-action {
+  font-size: 11px;
+  font-weight: 760;
 }
 
 .empty-state {
@@ -936,6 +1018,10 @@ dialog {
   width: min(980px, calc(100vw - 48px));
 }
 
+.setup-dialog {
+  width: min(980px, calc(100vw - 48px));
+}
+
 dialog::backdrop {
   background: rgba(15, 23, 42, 0.42);
 }
@@ -971,11 +1057,76 @@ dialog::backdrop {
   padding: 18px;
 }
 
+.setup-body {
+  max-height: min(820px, calc(100vh - 56px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 14px;
+  overflow: hidden;
+  padding: 18px;
+}
+
 .settings-header,
 .settings-footer,
 .section-head {
   justify-content: space-between;
   gap: 14px;
+}
+
+.wizard-grid {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  overflow: auto;
+}
+
+.wizard-card {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  padding: 13px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-card);
+  background: var(--surface-soft);
+}
+
+.privacy-card {
+  grid-column: 1 / -1;
+  border-color: #bfd4ff;
+  background: #f3f7ff;
+}
+
+.wizard-card strong {
+  color: var(--text);
+}
+
+.wizard-card span,
+.wizard-card small {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.wizard-step-head {
+  gap: 9px;
+}
+
+.wizard-step-head > div {
+  display: grid;
+  gap: 2px;
+}
+
+.step-number.small {
+  width: 24px;
+  height: 24px;
+  font-size: 13px;
+}
+
+.wizard-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .settings-header h3,
@@ -1026,6 +1177,7 @@ dialog::backdrop {
 }
 
 .field-stack input,
+.field-stack select,
 .field-stack textarea {
   font-weight: 450;
 }
@@ -1129,11 +1281,129 @@ dialog::backdrop {
   font: 12px/1.5 Consolas, "Cascadia Mono", monospace;
 }
 
+.history-list {
+  display: grid;
+  gap: 8px;
+}
+
+.history-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+}
+
+.history-row > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.history-row strong,
+.history-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-row strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.history-row span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.run-summary {
+  position: fixed;
+  left: 22px;
+  right: 22px;
+  bottom: 88px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 14px 34px rgba(15, 23, 42, 0.12);
+}
+
+.run-summary > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.run-summary strong {
+  color: var(--text);
+}
+
+.run-summary span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.summary-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.toast-stack {
+  position: fixed;
+  right: 18px;
+  bottom: 90px;
+  z-index: 40;
+  display: grid;
+  gap: 8px;
+  width: min(390px, calc(100vw - 36px));
+}
+
+.toast {
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px 9px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.14);
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.toast.success {
+  border-color: var(--success-border);
+  background: #f4fbf6;
+}
+
+.toast.warning {
+  border-color: var(--warning-border);
+  background: #fffaf0;
+}
+
+.toast.error {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+}
+
 @media (max-width: 1240px) {
   .shell {
-    width: calc(100vw - 14px);
-    height: calc(100vh - 14px);
-    margin: 7px;
+    width: 100vw;
+    height: 100vh;
+    margin: 0;
   }
 
   .workspace {
@@ -1142,7 +1412,7 @@ dialog::backdrop {
   }
 
   .queue-row {
-    grid-template-columns: 40px minmax(150px, 1fr) minmax(170px, 1.2fr) minmax(130px, 0.9fr) 150px;
+    grid-template-columns: 40px minmax(150px, 1fr) minmax(170px, 1.2fr) minmax(130px, 0.9fr) 142px;
   }
 
   .setup-pills {
@@ -1166,6 +1436,14 @@ dialog::backdrop {
   }
 
   .settings-section.span-2 {
+    grid-column: auto;
+  }
+
+  .wizard-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .privacy-card {
     grid-column: auto;
   }
 }

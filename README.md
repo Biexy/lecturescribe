@@ -1,53 +1,61 @@
 # LectureScribe
 
-LectureScribe is a small desktop app for downloading and transcribing lecture batches from YouTube links, Google Drive file links, `.txt` link files, and local audio/video files.
+LectureScribe is a local-first desktop app for turning lecture videos and audio into organized transcripts.
 
-The desktop app uses:
+It supports YouTube links, Google Drive file links, `.txt` link lists, and local audio/video files. The app previews the queue before starting, skips duplicates, tracks progress, and writes clean transcript files plus an index.
 
-- Tauri + TypeScript for the GUI
-- a native Rust transcription engine
-- FFmpeg for audio extraction/chunking
-- yt-dlp for YouTube and Google Drive downloads
-- Gemini for transcription
+## Highlights
 
-Python is not required for the desktop app. `bulk_transcriber.py` remains in the repo only as a legacy/reference script.
+- Native Windows desktop app built with Tauri, TypeScript, and Rust.
+- No Python runtime, virtualenv, pip install, or `.env` setup for normal users.
+- Bring your own Gemini API key from [Google AI Studio](https://aistudio.google.com/app/apikey).
+- Recommended default model: `gemini-3.1-flash-lite`.
+- Bundled Downloader for release builds, powered by `yt-dlp`.
+- Guided FFmpeg setup in the first-run wizard.
+- Supports batch preview, selection, retry failed, cancel, cache reuse, run history, and sanitized bug report export.
 
-## Requirements
+## Quick Start
 
-- Gemini API key from AI Studio
-- FFmpeg on PATH
-- `yt-dlp.exe` in this folder, or `yt-dlp` on PATH, only when downloading links
+1. Download and install the latest Windows release.
+2. Open LectureScribe.
+3. Follow the first-run setup wizard:
+   - add your Gemini API key,
+   - confirm FFmpeg,
+   - confirm Downloader,
+   - choose an output folder,
+   - run the setup test.
+4. Add links, a `.txt` link file, or local media.
+5. Review the queue and start.
 
-## Setup
+The setup test uses one tiny Gemini request to verify the key, FFmpeg audio path, and Gemini request path.
 
-Run the setup check:
+## Gemini API Key
 
-```powershell
-.\setup.ps1
-```
+LectureScribe uses your own Gemini API key. You can create one in [Google AI Studio](https://aistudio.google.com/app/apikey).
 
-Then launch the app:
+`gemini-3.1-flash-lite` is the recommended default because it is easy to select in AI Studio and is intended to be a lighter, cost-conscious model. Google rate limits and free-tier terms can change, so check the current Google documentation for exact limits.
 
-```powershell
-.\run.ps1
-```
+The app saves the key in the OS secure credential store. It is not written to `.env`, settings JSON, logs, history, or diagnostic exports.
 
-In the app, open **Settings**, paste your Gemini API key, and save it. The recommended default model is `gemini-3.1-flash-lite` because it is easy to get in AI Studio and is usually the most free-tier-friendly option.
+## Supported Sources
 
-Use **Test setup** after saving the key if you want to verify FFmpeg, Gemini, and the native audio request path. The test uses one Gemini request.
+- YouTube links.
+- Google Drive file links.
+- `.txt` files containing links.
+- Local media files:
+  - `mp3`, `m4a`, `wav`, `mp4`, `mov`, `mkv`, `webm`, `flac`, `ogg`, `opus`, `aac`.
 
-## Basic Use
+Pasted links are removable one by one. `.txt` files show the detected link count immediately. Duplicate sources are skipped and explained.
 
-1. Add sources with **Paste links**, **Add .txt link file**, drag and drop, or **Add media**.
-2. Review the queue. Preview updates automatically and every queue row is selectable.
-3. Uncheck anything you do not want to transcribe.
-4. Click **Start transcription**.
+## Run Modes
 
-When a `.txt` link file is added, LectureScribe shows how many links it found. Links and local media stay separated in the source inbox, and long URLs are truncated in the table without breaking the layout.
+- **Download + transcribe**: download link sources, then transcribe.
+- **Download only**: download YouTube/Drive media without using Gemini.
+- **Transcribe existing media**: transcribe local files or already downloaded media.
 
-During a run you can cancel at the next safe point. Completed transcript chunks stay cached, and failed items can be selected and retried without redoing successful cached chunks unless **Force re-transcribe** is enabled.
+The Downloader is required only for link download modes. FFmpeg is required for transcription and chunking.
 
-## Outputs
+## Output
 
 By default, transcripts are written to:
 
@@ -55,25 +63,63 @@ By default, transcripts are written to:
 Transcripts\organized
 ```
 
-The generated `00_index.md` tracks completed and pending transcript files. Audio chunks and cached chunk transcripts are stored under the work/cache folder so interrupted runs can resume without duplicating transcript text.
+Each completed item writes:
 
-## Developer Commands
+- a clean `.txt` transcript,
+- a readable Markdown `.md` transcript,
+- cached chunk transcripts for resume/retry,
+- `00_index.md` for the batch.
+
+Successful cached chunks are reused unless **Force re-transcribe** is enabled.
+
+## Privacy
+
+LectureScribe is local-first:
+
+- Your sources, downloads, transcripts, cache, and history stay on your computer.
+- Audio chunks are sent to Gemini only when transcription runs.
+- Diagnostic exports are sanitized and do not include API keys.
+
+## Developer Setup
+
+Requirements:
+
+- Node.js and npm.
+- Rust toolchain.
+- FFmpeg for transcription tests.
 
 From `lecturescribe-tauri`:
 
 ```powershell
+npm install
 npm run dev
 npm run build:frontend
 cargo check --manifest-path .\src-tauri\Cargo.toml
 cargo test --manifest-path .\src-tauri\Cargo.toml
 ```
 
-Create a desktop release:
+Create a release build:
 
 ```powershell
 npm run build
 ```
 
-## GitHub Safety
+`npm run build` downloads the official Windows `yt-dlp.exe` into Tauri resources before packaging. The binary is ignored by Git.
 
-Do not commit `.env`, transcripts, logs, downloaded media, or cache folders. The included `.gitignore` excludes the normal generated files.
+## Legacy Python
+
+The old Python implementation is archived in `archive/python-legacy/` for reference only. It is not part of the normal app runtime, setup, or release.
+
+## Troubleshooting
+
+- **Missing Gemini key**: open Setup and save a key from Google AI Studio.
+- **Missing FFmpeg**: use Setup -> Install FFmpeg, or choose an existing `ffmpeg.exe`.
+- **Private Drive/YouTube links fail**: add browser cookies in Advanced settings.
+- **Downloader missing**: release builds include it; Setup can also install or update it.
+- **Repeated transcript text**: retry with Force disabled first so cached successful chunks are reused.
+
+## Project
+
+- GitHub: [Biexy/lecturescribe](https://github.com/Biexy/lecturescribe)
+- License: MIT
+- Third-party notices: see `THIRD_PARTY_NOTICES.md`

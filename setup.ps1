@@ -3,28 +3,24 @@ param()
 $ErrorActionPreference = "Stop"
 $Root = $PSScriptRoot
 
-$EnvFile = Join-Path $Root ".env"
-$Example = Join-Path $Root ".env.example"
-if (-not (Test-Path $EnvFile)) {
-    if (Test-Path $Example) {
-        Copy-Item -LiteralPath $Example -Destination $EnvFile
-    } else {
-        "GEMINI_API_KEY=your-key-here" | Set-Content -LiteralPath $EnvFile -Encoding UTF8
-    }
-    Write-Host "Created .env. Add your Gemini API key before transcribing."
-}
+Write-Host "LectureScribe desktop setup is handled inside the app."
+Write-Host "Normal users should run the installer, open LectureScribe, and follow the first-run wizard."
+Write-Host ""
 
-if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
-    Write-Warning "FFmpeg was not found on PATH. Install FFmpeg before transcribing local or downloaded media."
+if (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
+    Write-Host "FFmpeg: available on PATH"
 } else {
-    Write-Host "FFmpeg: ready"
+    Write-Warning "FFmpeg was not found on PATH. The app wizard can install it or let you choose ffmpeg.exe."
 }
 
-$BundledYtDlp = Join-Path $Root "yt-dlp.exe"
-if ((Test-Path $BundledYtDlp) -or (Get-Command yt-dlp -ErrorAction SilentlyContinue)) {
-    Write-Host "yt-dlp: ready"
+$AppManagedYtDlp = Join-Path $env:LOCALAPPDATA "LectureScribe\tools\yt-dlp.exe"
+$LocalYtDlp = Join-Path $Root "yt-dlp.exe"
+if ((Test-Path $AppManagedYtDlp) -or (Test-Path $LocalYtDlp) -or (Get-Command yt-dlp -ErrorAction SilentlyContinue)) {
+    Write-Host "Downloader: available"
 } else {
-    Write-Warning "yt-dlp was not found. Put yt-dlp.exe in this folder or install yt-dlp on PATH for link downloads."
+    Write-Host "Downloader: not installed yet. Release builds bundle it; the app can also install/update it."
 }
 
-Write-Host "LectureScribe setup check complete. Python is not required for the desktop app."
+Write-Host ""
+Write-Host "Developer launch:"
+Write-Host ".\run.ps1"

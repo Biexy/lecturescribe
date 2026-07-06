@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,6 +21,10 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const DEFAULT_MODEL: &str = "gemini-3.1-flash-lite";
+const API_KEY_SERVICE: &str = "LectureScribe";
+const API_KEY_USER: &str = "gemini_api_key";
+const YT_DLP_WINDOWS_URL: &str =
+    "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
 const CHUNK_CACHE_VERSION: &str = "audio-v2";
 const INLINE_AUDIO_LIMIT_BYTES: u64 = 18 * 1024 * 1024;
 const MEDIA_EXTENSIONS: &[&str] = &[
@@ -49,10 +53,16 @@ struct QueueItem {
     source: String,
     url: String,
     media_path: String,
+    thumbnail_path: String,
     transcript_path: String,
+    markdown_path: String,
+    downloaded_media_path: String,
+    estimated_chunks: usize,
+    duplicate_of: Option<String>,
     selected: bool,
     status: String,
     error: Option<String>,
+    fix_action: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -79,6 +89,16 @@ struct AppSettings {
     download_dir: String,
     work_dir: String,
     model: String,
+    #[serde(default)]
+    run_mode: String,
+    #[serde(default)]
+    transcript_format: String,
+    #[serde(default)]
+    prompt_preset: String,
+    #[serde(default)]
+    ffmpeg_path: String,
+    #[serde(default)]
+    downloader_path: String,
     chunk_minutes: u32,
     request_delay_seconds: f64,
     #[serde(default)]
@@ -157,8 +177,8 @@ fn check_environment() -> EnvironmentStatus {
     let root = legacy_root();
     let settings = load_settings_from_root(&root);
     EnvironmentStatus {
-        ffmpeg: check_command("FFmpeg", "ffmpeg", "-version"),
-        yt_dlp: check_yt_dlp(&root),
+        ffmpeg: check_ffmpeg_with_settings(&settings),
+        yt_dlp: check_yt_dlp(&root, &settings),
         native_engine: ToolStatus {
             name: "Native engine".to_string(),
             ok: true,
@@ -194,36 +214,93 @@ fn save_api_key(api_key: String) -> Result<(), String> {
         return Err("Enter a valid Gemini API key first.".to_string());
     }
 
-    let root = legacy_root();
-    let env_path = root.join(".env");
-    let mut lines = if env_path.exists() {
-        fs::read_to_string(&env_path)
-            .map_err(|error| format!("Failed to read .env: {error}"))?
-            .trim_start_matches('\u{feff}')
-            .lines()
-            .map(str::to_string)
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-
-    let mut updated = false;
-    for line in &mut lines {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("GEMINI_API_KEY=") || trimmed.starts_with("GOOGLE_API_KEY=") {
-            *line = format!("GEMINI_API_KEY={value}");
-            updated = true;
-            break;
-        }
-    }
-
-    if !updated {
-        lines.push(format!("GEMINI_API_KEY={value}"));
-    }
-
-    fs::write(&env_path, format!("{}\n", lines.join("\n")))
-        .map_err(|error| format!("Failed to write .env: {error}"))?;
+    let entry = keyring::Entry::new(API_KEY_SERVICE, API_KEY_USER)
+        .map_err(|error| format!("Could not open secure credential store: {error}"))?;
+    entry
+        .set_password(value)
+        .map_err(|error| format!("Could not save API key securely: {error}"))?;
     Ok(())
+}
+
+#[tauri::command]
+fn check_downloader() -> ToolStatus {
+    let root = legacy_root();
+    let settings = load_settings_from_root(&root);
+    check_yt_dlp(&root, &settings)
+}
+
+#[tauri::command]
+fn install_downloader() -> Result<ToolStatus, String> {
+    install_or_update_downloader()
+}
+
+#[tauri::command]
+fn update_downloader() -> Result<ToolStatus, String> {
+    install_or_update_downloader()
+}
+
+#[tauri::command]
+fn choose_downloader(path: String) -> Result<AppSettings, String> {
+    let root = legacy_root();
+    let target = PathBuf::from(path.trim());
+    if !target.exists() {
+        return Err("Downloader file was not found.".to_string());
+    }
+    let mut settings = load_settings_from_root(&root);
+    settings.downloader_path = target.to_string_lossy().to_string();
+    save_settings(settings)
+}
+
+#[tauri::command]
+fn check_ffmpeg() -> ToolStatus {
+    let settings = load_settings();
+    check_ffmpeg_with_settings(&settings)
+}
+
+#[tauri::command]
+fn install_ffmpeg() -> Result<ToolStatus, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let status = Command::new("winget")
+            .args([
+                "install",
+                "--id",
+                "Gyan.FFmpeg",
+                "-e",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+            ])
+            .status()
+            .map_err(|error| {
+                format!(
+                    "Could not start winget. Install FFmpeg manually or choose ffmpeg.exe: {error}"
+                )
+            })?;
+        if !status.success() {
+            return Err(
+                "winget could not install FFmpeg. Install FFmpeg manually, then choose ffmpeg.exe."
+                    .to_string(),
+            );
+        }
+        Ok(check_ffmpeg())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Automatic FFmpeg install is only available on Windows for now.".to_string())
+    }
+}
+
+#[tauri::command]
+fn choose_ffmpeg(path: String) -> Result<AppSettings, String> {
+    let root = legacy_root();
+    let target = PathBuf::from(path.trim());
+    if !target.exists() {
+        return Err("FFmpeg file was not found.".to_string());
+    }
+    let mut settings = load_settings_from_root(&root);
+    settings.ffmpeg_path = target.to_string_lossy().to_string();
+    save_settings(settings)
 }
 
 #[tauri::command]
@@ -248,16 +325,6 @@ fn start_transcription(
     CANCEL_REQUESTED.store(false, Ordering::SeqCst);
     let root = legacy_root();
     let settings = sanitize_settings(&root, settings);
-    let api_key = api_key_from_env_or_file(&root).ok_or_else(|| {
-        "API key missing. Add your Gemini API key in Settings, then start again.".to_string()
-    })?;
-
-    let ffmpeg = check_command("FFmpeg", "ffmpeg", "-version");
-    if !ffmpeg.ok {
-        return Err(
-            "FFmpeg is missing. Install FFmpeg and make sure it is available on PATH.".to_string(),
-        );
-    }
 
     let sources = resolve_sources(&root, &inputs, true)?;
     if sources.urls.is_empty() && sources.media_sources.is_empty() {
@@ -266,9 +333,28 @@ fn start_transcription(
         );
     }
 
-    if !sources.urls.is_empty() && !settings.skip_download && !check_yt_dlp(&root).ok {
+    let mode = normalized_run_mode(&settings);
+    let needs_transcription = mode != "download_only";
+    let needs_downloader = !sources.urls.is_empty() && mode != "transcribe_existing";
+
+    let api_key = if needs_transcription {
+        Some(api_key_from_env_or_file(&root).ok_or_else(|| {
+            "API key missing. Add your Gemini API key in Setup, then start again.".to_string()
+        })?)
+    } else {
+        None
+    };
+
+    if needs_transcription && !check_ffmpeg_with_settings(&settings).ok {
         return Err(
-            "yt-dlp is missing. Add yt-dlp.exe next to the app or install yt-dlp on PATH."
+            "FFmpeg is missing. Install FFmpeg or choose ffmpeg.exe in Setup before transcription."
+                .to_string(),
+        );
+    }
+
+    if needs_downloader && !check_yt_dlp(&root, &settings).ok {
+        return Err(
+            "Downloader is missing. Install or update the Downloader in Setup before using links."
                 .to_string(),
         );
     }
@@ -326,7 +412,7 @@ fn run_setup_test() -> Result<SetupTestResult, String> {
             .to_string()
     })?;
 
-    if !check_command("FFmpeg", "ffmpeg", "-version").ok {
+    if !check_ffmpeg_with_settings(&settings).ok {
         return Err("FFmpeg is missing. Install FFmpeg and make sure it is available on PATH before running the setup test.".to_string());
     }
 
@@ -335,7 +421,7 @@ fn run_setup_test() -> Result<SetupTestResult, String> {
         .map_err(|error| format!("Failed to create setup test folder: {error}"))?;
     let sample = work_dir.join("setup-test.mp3");
 
-    let mut command = Command::new("ffmpeg");
+    let mut command = Command::new(ffmpeg_command(&settings));
     command
         .arg("-y")
         .arg("-hide_banner")
@@ -391,6 +477,31 @@ fn open_transcript(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn reveal_media(path: String) -> Result<(), String> {
+    let target = PathBuf::from(path.trim());
+    if target.as_os_str().is_empty() {
+        return Err("No media path is available yet.".to_string());
+    }
+    let folder = if target.is_dir() {
+        target
+    } else {
+        target
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| "Could not find the media folder.".to_string())?
+    };
+    if !folder.exists() {
+        return Err("Media folder was not found yet.".to_string());
+    }
+    open_path(&folder)
+}
+
+#[tauri::command]
+fn copy_output_path() -> Result<String, String> {
+    Ok(load_settings().output_dir)
+}
+
+#[tauri::command]
 fn open_output_dir(path: String) -> Result<(), String> {
     let target = if path.trim().is_empty() {
         legacy_root().join("Transcripts").join("organized")
@@ -434,7 +545,7 @@ fn open_path(target: &Path) -> Result<(), String> {
 fn run_native_engine(
     app: AppHandle,
     root: PathBuf,
-    api_key: String,
+    api_key: Option<String>,
     sources: SourceBundle,
     settings: AppSettings,
 ) -> Result<(), String> {
@@ -462,8 +573,9 @@ fn run_native_engine(
         },
     );
 
+    let mode = normalized_run_mode(&settings);
     if !sources.urls.is_empty() {
-        if settings.skip_download {
+        if mode == "transcribe_existing" || settings.skip_download {
             emit_line(
                 &app,
                 "[~] Skip download is enabled; using existing media only.",
@@ -472,6 +584,27 @@ fn run_native_engine(
             ensure_not_cancelled()?;
             download_urls(&app, &root, &settings, &sources.urls)?;
         }
+    }
+
+    if mode == "download_only" {
+        emit_line(&app, "[OK] Download run complete.");
+        emit_progress(
+            &app,
+            EngineProgress {
+                phase: "Complete".to_string(),
+                message: "Download run complete".to_string(),
+                status: "Done".to_string(),
+                current_item: None,
+                total_items: sources.urls.len(),
+                completed_items: sources.urls.len(),
+                chunk_current: 0,
+                chunk_total: 0,
+                download_speed: "0 KB/s".to_string(),
+                percent: 100.0,
+            },
+        );
+        emit_done(&app, true, Some(0));
+        return Ok(());
     }
 
     ensure_not_cancelled()?;
@@ -494,6 +627,8 @@ fn run_native_engine(
         total_items: items.len(),
         completed_items: 0,
     };
+    let api_key =
+        api_key.ok_or_else(|| "API key missing. Add your Gemini API key in Setup.".to_string())?;
     let client = GeminiClient::new(api_key, settings.model.clone())?;
     let chunk_seconds = settings.chunk_minutes * 60;
 
@@ -539,7 +674,7 @@ fn download_urls(
     settings: &AppSettings,
     urls: &[String],
 ) -> Result<(), String> {
-    let yt_dlp = yt_dlp_command(root)?;
+    let yt_dlp = yt_dlp_command(root, settings)?;
     let download_dir = PathBuf::from(&settings.download_dir);
     fs::create_dir_all(&download_dir)
         .map_err(|error| format!("Failed to create download folder: {error}"))?;
@@ -682,7 +817,7 @@ fn transcribe_item(
     fs::create_dir_all(&item_text_dir)
         .map_err(|error| format!("Failed to create chunk text folder: {error}"))?;
 
-    let chunks = split_audio(&item.media_path, &item_chunk_dir, chunk_seconds)?;
+    let chunks = split_audio(&item.media_path, &item_chunk_dir, chunk_seconds, settings)?;
     if chunks.is_empty() {
         return Err(format!(
             "No chunks were created for: {}",
@@ -800,7 +935,13 @@ fn transcribe_chunk(
             .map_err(|error| format!("Failed to read cached chunk text: {error}"));
     }
 
-    let prompt = build_prompt(title, chunk_number, chunk_count, offset_seconds);
+    let prompt = build_prompt(
+        title,
+        chunk_number,
+        chunk_count,
+        offset_seconds,
+        &settings.prompt_preset,
+    );
     let mut last_text = String::new();
     for attempt in 1..=2 {
         ensure_not_cancelled()?;
@@ -1065,10 +1206,20 @@ fn build_preview_queue(
             media_path: media_path
                 .map(|path| path.to_string_lossy().to_string())
                 .unwrap_or_default(),
+            thumbnail_path: String::new(),
+            markdown_path: markdown_path_from_transcript(&transcript_path),
+            downloaded_media_path: String::new(),
             transcript_path,
+            estimated_chunks: 0,
+            duplicate_of: None,
             selected: true,
             status: status.to_string(),
             error: None,
+            fix_action: if status == "Will download" {
+                Some("download".to_string())
+            } else {
+                None
+            },
         });
     }
 
@@ -1095,10 +1246,16 @@ fn build_preview_queue(
             source: path.to_string_lossy().to_string(),
             url: String::new(),
             media_path: path.to_string_lossy().to_string(),
+            thumbnail_path: String::new(),
+            markdown_path: markdown_path_from_transcript(&transcript_path),
+            downloaded_media_path: path.to_string_lossy().to_string(),
             transcript_path,
+            estimated_chunks: 0,
+            duplicate_of: None,
             selected: true,
             status: "Ready".to_string(),
             error: None,
+            fix_action: None,
         });
     }
 
@@ -1315,6 +1472,7 @@ fn split_audio(
     media_path: &Path,
     item_chunk_dir: &Path,
     chunk_seconds: u32,
+    settings: &AppSettings,
 ) -> Result<Vec<PathBuf>, String> {
     fs::create_dir_all(item_chunk_dir)
         .map_err(|error| format!("Failed to create audio chunk folder: {error}"))?;
@@ -1324,7 +1482,7 @@ fn split_audio(
     }
 
     let pattern = item_chunk_dir.join("chunk_%03d.mp3");
-    let mut command = Command::new("ffmpeg");
+    let mut command = Command::new(ffmpeg_command(settings));
     command
         .arg("-hide_banner")
         .arg("-loglevel")
@@ -1399,7 +1557,7 @@ fn write_transcript(
 ) -> Result<(), String> {
     fs::create_dir_all(output_dir)
         .map_err(|error| format!("Failed to create output folder: {error}"))?;
-    let mut body = vec![
+    let mut markdown = vec![
         format!("# {:02} - {}", item.number, item.title),
         String::new(),
         format!("Source: {}", item.source),
@@ -1412,23 +1570,48 @@ fn write_transcript(
         ),
         String::new(),
     ];
+    let mut plain = vec![
+        format!("{:02} - {}", item.number, item.title),
+        format!("Source: {}", item.source),
+        format!(
+            "Media: {}",
+            item.media_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+        ),
+        String::new(),
+    ];
 
     for (chunk_index, offset, text) in chunk_texts {
-        body.extend([
-            format!(
-                "## Chunk {:02} [{}]",
-                chunk_index,
-                seconds_to_stamp(*offset)
-            ),
+        let stamp = seconds_to_stamp(*offset);
+        markdown.extend([
+            format!("## Chunk {:02} [{}]", chunk_index, stamp),
             String::new(),
+            text.trim().to_string(),
+            String::new(),
+        ]);
+        plain.extend([
+            format!("[{}]", stamp),
             text.trim().to_string(),
             String::new(),
         ]);
     }
 
     let target = final_path(output_dir, item);
-    fs::write(&target, format!("{}\n", body.join("\n").trim()))
+    fs::write(&target, format!("{}\n", plain.join("\n").trim()))
         .map_err(|error| format!("Failed to write transcript {}: {error}", target.display()))?;
+    let markdown_target = markdown_path(output_dir, item);
+    fs::write(
+        &markdown_target,
+        format!("{}\n", markdown.join("\n").trim()),
+    )
+    .map_err(|error| {
+        format!(
+            "Failed to write Markdown transcript {}: {error}",
+            markdown_target.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -1438,12 +1621,13 @@ fn write_index(output_dir: &Path, items: &[MediaItem]) -> Result<(), String> {
     let mut lines = vec![
         "# Transcripts".to_string(),
         String::new(),
-        "| # | Status | Title | Transcript | Source |".to_string(),
-        "|---:|---|---|---|---|".to_string(),
+        "| # | Status | Title | TXT | Markdown | Source |".to_string(),
+        "|---:|---|---|---|---|---|".to_string(),
     ];
 
     for item in items {
         let target = final_path(output_dir, item);
+        let md_target = markdown_path(output_dir, item);
         let status = if target.exists() { "done" } else { "pending" };
         let transcript = if target.exists() {
             format!(
@@ -1456,10 +1640,21 @@ fn write_index(output_dir: &Path, items: &[MediaItem]) -> Result<(), String> {
         } else {
             String::new()
         };
+        let markdown = if md_target.exists() {
+            format!(
+                "`{}`",
+                md_target
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default()
+            )
+        } else {
+            String::new()
+        };
         let source = item.source.replace('|', "\\|");
         lines.push(format!(
-            "| {} | {} | {} | {} | {} |",
-            item.number, status, item.title, transcript, source
+            "| {} | {} | {} | {} | {} | {} |",
+            item.number, status, item.title, transcript, markdown, source
         ));
     }
 
@@ -1479,19 +1674,48 @@ fn final_path(output_dir: &Path, item: &MediaItem) -> PathBuf {
     ))
 }
 
+fn markdown_path(output_dir: &Path, item: &MediaItem) -> PathBuf {
+    output_dir.join(format!(
+        "{:02} - {} [{}].md",
+        item.number,
+        safe_filename(&item.title),
+        safe_filename(&item.item_id)
+    ))
+}
+
+fn markdown_path_from_transcript(path: &str) -> String {
+    let mut target = PathBuf::from(path);
+    target.set_extension("md");
+    target.to_string_lossy().to_string()
+}
+
 fn build_prompt(
     title: &str,
     chunk_number: usize,
     chunk_count: usize,
     offset_seconds: u32,
+    prompt_preset: &str,
 ) -> String {
     let offset = seconds_to_stamp(offset_seconds);
+    let preset_guidance = match prompt_preset {
+        "arabic_lecture" => {
+            "Preset: Arabic lecture. Prefer clear formal Arabic for Arabic speech while keeping spoken English technical terms in English."
+        }
+        "english_lecture" => {
+            "Preset: English lecture. Use clear academic English and preserve technical terms exactly as spoken."
+        }
+        "technical_math" => {
+            "Preset: Technical/math lecture. Preserve formulas, variables, units, code terms, and step-by-step reasoning exactly."
+        }
+        _ => "Preset: Default lecture transcription.",
+    };
     format!(
         r#"You are transcribing one short audio chunk from a lecture, class recording, or educational video.
 
 Lecture title: {title}
 Chunk: {chunk_number} of {chunk_count}
 Chunk start time in the original lecture: {offset}
+{preset_guidance}
 
 Return only the transcript for this chunk.
 
@@ -2031,26 +2255,44 @@ fn is_media_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn check_yt_dlp(root: &Path) -> ToolStatus {
-    match yt_dlp_command(root) {
+fn check_yt_dlp(root: &Path, settings: &AppSettings) -> ToolStatus {
+    match yt_dlp_command(root, settings) {
         Ok(path) => ToolStatus {
-            name: "yt-dlp".to_string(),
+            name: "Downloader".to_string(),
             ok: true,
-            detail: path.to_string_lossy().to_string(),
+            detail: tool_detail(&path, "yt-dlp"),
         },
         Err(error) => ToolStatus {
-            name: "yt-dlp".to_string(),
+            name: "Downloader".to_string(),
             ok: false,
             detail: error,
         },
     }
 }
 
-fn yt_dlp_command(root: &Path) -> Result<PathBuf, String> {
-    for bundled in [root.join("yt-dlp.exe"), install_root().join("yt-dlp.exe")] {
-        if bundled.exists() {
-            return Ok(bundled);
+fn yt_dlp_command(root: &Path, settings: &AppSettings) -> Result<PathBuf, String> {
+    if let Some(path) = valid_custom_tool(&settings.downloader_path) {
+        return Ok(path);
+    }
+
+    let app_tool = tools_root().join(if cfg!(target_os = "windows") {
+        "yt-dlp.exe"
+    } else {
+        "yt-dlp"
+    });
+    if app_tool.exists() {
+        return Ok(app_tool);
+    }
+
+    if let Some(bundled) = bundled_downloader(root) {
+        if let Some(parent) = app_tool.parent() {
+            let _ = fs::create_dir_all(parent);
         }
+        let _ = fs::copy(&bundled, &app_tool);
+        if app_tool.exists() {
+            return Ok(app_tool);
+        }
+        return Ok(bundled);
     }
 
     let path = if cfg!(target_os = "windows") {
@@ -2062,29 +2304,125 @@ fn yt_dlp_command(root: &Path) -> Result<PathBuf, String> {
         return Ok(PathBuf::from(path));
     }
 
-    Err("not found".to_string())
+    Err(
+        "Downloader is missing. Install it from Setup or choose an existing yt-dlp executable."
+            .to_string(),
+    )
 }
 
-fn check_command(name: &str, command: &str, version_arg: &str) -> ToolStatus {
-    let result = Command::new(command).arg(version_arg).output();
-    match result {
-        Ok(output)
-            if output.status.success()
-                || !output.stdout.is_empty()
-                || !output.stderr.is_empty() =>
-        {
-            ToolStatus {
-                name: name.to_string(),
-                ok: true,
-                detail: "available on PATH".to_string(),
-            }
-        }
-        _ => ToolStatus {
-            name: name.to_string(),
-            ok: false,
-            detail: "not found".to_string(),
-        },
+fn bundled_downloader(root: &Path) -> Option<PathBuf> {
+    let install = install_root();
+    [
+        root.join("yt-dlp.exe"),
+        install.join("yt-dlp.exe"),
+        install.join("resources").join("yt-dlp.exe"),
+        install.join("resources").join("tools").join("yt-dlp.exe"),
+    ]
+    .into_iter()
+    .find(|path| path.exists())
+}
+
+fn install_or_update_downloader() -> Result<ToolStatus, String> {
+    let target = tools_root().join("yt-dlp.exe");
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create tools folder: {error}"))?;
     }
+
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("LectureScribe")
+        .build()
+        .map_err(|error| format!("Failed to prepare downloader request: {error}"))?;
+    let mut response = client
+        .get(YT_DLP_WINDOWS_URL)
+        .send()
+        .map_err(|error| format!("Failed to download yt-dlp.exe: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Downloader download failed with HTTP {}",
+            response.status()
+        ));
+    }
+
+    let temp = target.with_extension("exe.download");
+    let mut file = fs::File::create(&temp)
+        .map_err(|error| format!("Failed to create download file: {error}"))?;
+    response
+        .copy_to(&mut file)
+        .map_err(|error| format!("Failed to save downloader: {error}"))?;
+    file.flush()
+        .map_err(|error| format!("Failed to finish downloader download: {error}"))?;
+    if target.exists() {
+        fs::remove_file(&target)
+            .map_err(|error| format!("Failed to replace existing downloader: {error}"))?;
+    }
+    fs::rename(&temp, &target).map_err(|error| format!("Failed to install downloader: {error}"))?;
+
+    let root = legacy_root();
+    let mut settings = load_settings_from_root(&root);
+    settings.downloader_path = target.to_string_lossy().to_string();
+    let _ = save_settings(settings.clone());
+    Ok(check_yt_dlp(&root, &settings))
+}
+
+fn check_ffmpeg_with_settings(settings: &AppSettings) -> ToolStatus {
+    let command = ffmpeg_command(settings);
+    if command_exists_path(&command, "-version") {
+        ToolStatus {
+            name: "FFmpeg".to_string(),
+            ok: true,
+            detail: tool_detail(&command, "ffmpeg"),
+        }
+    } else {
+        ToolStatus {
+            name: "FFmpeg".to_string(),
+            ok: false,
+            detail: "Missing. Install FFmpeg or choose ffmpeg.exe in Setup.".to_string(),
+        }
+    }
+}
+
+fn ffmpeg_command(settings: &AppSettings) -> PathBuf {
+    valid_custom_tool(&settings.ffmpeg_path).unwrap_or_else(|| PathBuf::from("ffmpeg"))
+}
+
+fn valid_custom_tool(value: &str) -> Option<PathBuf> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(value);
+    path.exists().then_some(path)
+}
+
+fn tool_detail(path: &Path, fallback_name: &str) -> String {
+    let version = Command::new(path)
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|output| {
+            let text = if output.stdout.is_empty() {
+                String::from_utf8_lossy(&output.stderr).to_string()
+            } else {
+                String::from_utf8_lossy(&output.stdout).to_string()
+            };
+            text.lines().next().map(|line| line.trim().to_string())
+        });
+    let location = path.to_string_lossy();
+    match version {
+        Some(version) if !version.is_empty() => format!("{version} - {location}"),
+        _ => format!("{fallback_name} ready - {location}"),
+    }
+}
+
+fn command_exists_path(command: &Path, version_arg: &str) -> bool {
+    Command::new(command)
+        .arg(version_arg)
+        .output()
+        .map(|output| {
+            output.status.success() || !output.stdout.is_empty() || !output.stderr.is_empty()
+        })
+        .unwrap_or(false)
 }
 
 fn command_exists(command: &str) -> bool {
@@ -2102,6 +2440,10 @@ fn has_api_key(root: &Path) -> bool {
 }
 
 fn api_key_from_env_or_file(root: &Path) -> Option<String> {
+    if let Some(value) = api_key_from_keyring() {
+        return Some(value);
+    }
+
     for key in ["GEMINI_API_KEY", "GOOGLE_API_KEY"] {
         if let Ok(value) = std::env::var(key) {
             let value = value
@@ -2137,6 +2479,12 @@ fn api_key_from_env_or_file(root: &Path) -> Option<String> {
     None
 }
 
+fn api_key_from_keyring() -> Option<String> {
+    let entry = keyring::Entry::new(API_KEY_SERVICE, API_KEY_USER).ok()?;
+    let value = entry.get_password().ok()?;
+    valid_api_key(&value).then_some(value)
+}
+
 fn valid_api_key(value: &str) -> bool {
     let value = value.trim().trim_matches('"').trim_matches('\'');
     !value.is_empty() && value != "put-your-gemini-api-key-here"
@@ -2167,6 +2515,11 @@ fn default_settings(root: &Path) -> AppSettings {
             .to_string_lossy()
             .to_string(),
         model: DEFAULT_MODEL.to_string(),
+        run_mode: "download_transcribe".to_string(),
+        transcript_format: "txt_markdown".to_string(),
+        prompt_preset: "default".to_string(),
+        ffmpeg_path: String::new(),
+        downloader_path: String::new(),
         chunk_minutes: 2,
         request_delay_seconds: 5.0,
         cookies_from_browser: String::new(),
@@ -2187,6 +2540,19 @@ fn sanitize_settings(root: &Path, settings: AppSettings) -> AppSettings {
         } else {
             settings.model.trim().to_string()
         },
+        run_mode: normalize_run_mode_value(&settings.run_mode),
+        transcript_format: if settings.transcript_format.trim().is_empty() {
+            defaults.transcript_format
+        } else {
+            settings.transcript_format.trim().to_string()
+        },
+        prompt_preset: if settings.prompt_preset.trim().is_empty() {
+            defaults.prompt_preset
+        } else {
+            settings.prompt_preset.trim().to_string()
+        },
+        ffmpeg_path: settings.ffmpeg_path.trim().to_string(),
+        downloader_path: settings.downloader_path.trim().to_string(),
         chunk_minutes: settings.chunk_minutes.clamp(1, 30),
         request_delay_seconds: settings.request_delay_seconds.clamp(0.0, 120.0),
         cookies_from_browser: settings.cookies_from_browser.trim().to_string(),
@@ -2202,6 +2568,18 @@ fn clean_path_setting(value: String, fallback: String) -> String {
         fallback
     } else {
         value.to_string()
+    }
+}
+
+fn normalized_run_mode(settings: &AppSettings) -> String {
+    normalize_run_mode_value(&settings.run_mode)
+}
+
+fn normalize_run_mode_value(value: &str) -> String {
+    match value.trim() {
+        "download_only" => "download_only".to_string(),
+        "transcribe_existing" => "transcribe_existing".to_string(),
+        _ => "download_transcribe".to_string(),
     }
 }
 
@@ -2243,6 +2621,10 @@ fn install_root() -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
+fn tools_root() -> PathBuf {
+    user_data_root().join("tools")
+}
+
 fn user_data_root() -> PathBuf {
     if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
         return PathBuf::from(local_app_data).join("LectureScribe");
@@ -2263,13 +2645,22 @@ fn main() {
             save_settings,
             save_api_key,
             api_key_ready,
+            check_downloader,
+            install_downloader,
+            update_downloader,
+            choose_downloader,
+            check_ffmpeg,
+            install_ffmpeg,
+            choose_ffmpeg,
             count_links_in_file,
             start_transcription,
             cancel_transcription,
             run_setup_test,
             open_output_dir,
             open_output_folder,
-            open_transcript
+            open_transcript,
+            reveal_media,
+            copy_output_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running LectureScribe");
@@ -2361,7 +2752,9 @@ mod tests {
             return;
         }
 
-        let chunks = split_audio(&media, &temp.join("chunks"), 1).expect("split mp4 audio");
+        let settings = default_settings(&legacy_root());
+        let chunks =
+            split_audio(&media, &temp.join("chunks"), 1, &settings).expect("split mp4 audio");
         assert!(!chunks.is_empty());
         assert!(chunks
             .iter()

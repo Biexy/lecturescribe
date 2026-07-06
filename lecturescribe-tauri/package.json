@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
-    "build": "tauri build",
+    "build": "npm run bundle:downloader && tauri build",
+    "bundle:downloader": "powershell -ExecutionPolicy Bypass -File ..\\scripts\\fetch-yt-dlp.ps1",
     "dev:frontend": "vite --host 127.0.0.1 --port 1420",
     "build:frontend": "tsc && vite build",
     "preview": "vite preview"
