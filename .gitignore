@@ -1,0 +1,45 @@
+.env
+.codex/
+.lecturescribe-settings.json
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Runtime logs
+*.log
+*.err.log
+
+# User media and generated output
+Transcripts/
+downloads/
+* downloads/
+Drive links.txt
+links.txt
+*.mp3
+*.mp4
+*.m4a
+*.webm
+*.wav
+*.aac
+*.flac
+*.ogg
+*.opus
+*.mov
+*.mkv
+
+# Local binaries and OS files
+yt-dlp.exe
+desktop.ini
+_pasted_links*.txt
+lecturescribe-tauri/node_modules/
+lecturescribe-tauri/dist/
+lecturescribe-tauri/src-tauri/target/
+lecturescribe-tauri/src-tauri/gen/
+
+# Local one-off/legacy experiment scripts, not part of the native app
+drive_*.ps1
+organize_drive_transcripts.py
+transcribe.py
+transcribe_drive_chunked.py
+gui.py
