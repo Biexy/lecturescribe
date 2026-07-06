@@ -92,6 +92,8 @@ struct AppSettings {
     #[serde(default)]
     run_mode: String,
     #[serde(default)]
+    theme: String,
+    #[serde(default)]
     transcript_format: String,
     #[serde(default)]
     prompt_preset: String,
@@ -120,6 +122,13 @@ struct SetupTestResult {
     ok: bool,
     message: String,
     transcript_preview: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DefaultSourceSummary {
+    path: String,
+    label: String,
+    link_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -314,6 +323,22 @@ fn count_links_in_file(path: String) -> Result<usize, String> {
     let text = fs::read_to_string(&path)
         .map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
     Ok(extract_urls(&text).len())
+}
+
+#[tauri::command]
+fn default_source_summary() -> Result<Option<DefaultSourceSummary>, String> {
+    Ok(default_source_file(&legacy_root()).map(|path| {
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        DefaultSourceSummary {
+            path: path.to_string_lossy().to_string(),
+            label: path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("link file")
+                .to_string(),
+            link_count: extract_urls(&text).len(),
+        }
+    }))
 }
 
 #[tauri::command]
@@ -613,7 +638,7 @@ fn run_native_engine(
         return Err("No media files found after preview/download. Check the links or add local media files.".to_string());
     }
 
-    write_index(Path::new(&settings.output_dir), &items)?;
+    write_index(Path::new(&settings.output_dir), &items, &settings)?;
     emit_line(
         &app,
         format!(
@@ -644,10 +669,10 @@ fn run_native_engine(
             item,
             &mut run_state,
         )?;
-        write_index(Path::new(&settings.output_dir), &items)?;
+        write_index(Path::new(&settings.output_dir), &items, &settings)?;
     }
 
-    write_index(Path::new(&settings.output_dir), &items)?;
+    write_index(Path::new(&settings.output_dir), &items, &settings)?;
     emit_line(&app, "[OK] Transcription run complete.");
     emit_progress(
         &app,
@@ -697,7 +722,7 @@ fn download_urls(
             app,
             EngineProgress {
                 phase: "Downloading".to_string(),
-                message: format!("Downloading {}/{}", index + 1, urls.len()),
+                message: format!("Downloading selected item {}/{}", index + 1, urls.len()),
                 status: "Running".to_string(),
                 current_item: None,
                 total_items: urls.len(),
@@ -740,7 +765,7 @@ fn download_urls(
                     app,
                     EngineProgress {
                         phase: "Downloading".to_string(),
-                        message: format!("Downloading {}/{}", index + 1, urls.len()),
+                        message: format!("Downloading selected item {}/{}", index + 1, urls.len()),
                         status: "Running".to_string(),
                         current_item: None,
                         total_items: urls.len(),
@@ -780,8 +805,8 @@ fn transcribe_item(
     run_state: &mut RunState,
 ) -> Result<(), String> {
     ensure_not_cancelled()?;
-    let target = final_path(output_dir, item);
-    if target.exists() && !settings.force {
+    let target = primary_output_path(output_dir, item, settings);
+    if transcript_outputs_complete(output_dir, item, settings) && !settings.force {
         emit_line(
             app,
             format!(
@@ -896,7 +921,7 @@ fn transcribe_item(
         chunk_texts.push((chunk_number, offset, text.trim().to_string()));
     }
 
-    write_transcript(output_dir, item, &chunk_texts)?;
+    write_transcript(output_dir, item, settings, &chunk_texts)?;
     run_state.completed_items += 1;
     emit_line(app, format!("[OK] Saved transcript: {}", target.display()));
     emit_progress(
@@ -1350,12 +1375,8 @@ fn resolve_sources(
         .collect::<Vec<_>>();
 
     if raw_inputs.is_empty() && use_defaults {
-        for candidate in ["Drive links.txt", "links.txt"] {
-            let path = root.join(candidate);
-            if path.exists() {
-                raw_inputs.push(path.to_string_lossy().to_string());
-                break;
-            }
+        if let Some(path) = default_source_file(root) {
+            raw_inputs.push(path.to_string_lossy().to_string());
         }
     }
 
@@ -1394,6 +1415,13 @@ fn resolve_sources(
         urls,
         media_sources,
     })
+}
+
+fn default_source_file(root: &Path) -> Option<PathBuf> {
+    ["Drive links.txt", "links.txt"]
+        .into_iter()
+        .map(|candidate| root.join(candidate))
+        .find(|path| path.exists())
 }
 
 fn push_url_source(urls: &mut Vec<String>, seen_urls: &mut HashSet<String>, url: String) {
@@ -1553,6 +1581,7 @@ fn sorted_chunk_files(item_chunk_dir: &Path) -> Vec<PathBuf> {
 fn write_transcript(
     output_dir: &Path,
     item: &MediaItem,
+    settings: &AppSettings,
     chunk_texts: &[(usize, u32, String)],
 ) -> Result<(), String> {
     fs::create_dir_all(output_dir)
@@ -1599,23 +1628,49 @@ fn write_transcript(
     }
 
     let target = final_path(output_dir, item);
-    fs::write(&target, format!("{}\n", plain.join("\n").trim()))
-        .map_err(|error| format!("Failed to write transcript {}: {error}", target.display()))?;
+    if writes_plain(settings) {
+        fs::write(&target, format!("{}\n", plain.join("\n").trim())).map_err(|error| {
+            format!("Failed to write transcript {}: {error}", target.display())
+        })?;
+    }
     let markdown_target = markdown_path(output_dir, item);
-    fs::write(
-        &markdown_target,
-        format!("{}\n", markdown.join("\n").trim()),
-    )
-    .map_err(|error| {
-        format!(
-            "Failed to write Markdown transcript {}: {error}",
-            markdown_target.display()
+    if writes_markdown(settings) {
+        fs::write(
+            &markdown_target,
+            format!("{}\n", markdown.join("\n").trim()),
         )
-    })?;
+        .map_err(|error| {
+            format!(
+                "Failed to write Markdown transcript {}: {error}",
+                markdown_target.display()
+            )
+        })?;
+    }
     Ok(())
 }
 
-fn write_index(output_dir: &Path, items: &[MediaItem]) -> Result<(), String> {
+fn primary_output_path(output_dir: &Path, item: &MediaItem, settings: &AppSettings) -> PathBuf {
+    if writes_plain(settings) {
+        final_path(output_dir, item)
+    } else {
+        markdown_path(output_dir, item)
+    }
+}
+
+fn transcript_outputs_complete(output_dir: &Path, item: &MediaItem, settings: &AppSettings) -> bool {
+    (!writes_plain(settings) || final_path(output_dir, item).exists())
+        && (!writes_markdown(settings) || markdown_path(output_dir, item).exists())
+}
+
+fn writes_plain(settings: &AppSettings) -> bool {
+    normalized_transcript_format(&settings.transcript_format) != "markdown"
+}
+
+fn writes_markdown(settings: &AppSettings) -> bool {
+    normalized_transcript_format(&settings.transcript_format) != "txt"
+}
+
+fn write_index(output_dir: &Path, items: &[MediaItem], settings: &AppSettings) -> Result<(), String> {
     fs::create_dir_all(output_dir)
         .map_err(|error| format!("Failed to create output folder: {error}"))?;
     let mut lines = vec![
@@ -1628,8 +1683,12 @@ fn write_index(output_dir: &Path, items: &[MediaItem]) -> Result<(), String> {
     for item in items {
         let target = final_path(output_dir, item);
         let md_target = markdown_path(output_dir, item);
-        let status = if target.exists() { "done" } else { "pending" };
-        let transcript = if target.exists() {
+        let status = if transcript_outputs_complete(output_dir, item, settings) {
+            "done"
+        } else {
+            "pending"
+        };
+        let transcript = if writes_plain(settings) && target.exists() {
             format!(
                 "`{}`",
                 target
@@ -1640,7 +1699,7 @@ fn write_index(output_dir: &Path, items: &[MediaItem]) -> Result<(), String> {
         } else {
             String::new()
         };
-        let markdown = if md_target.exists() {
+        let markdown = if writes_markdown(settings) && md_target.exists() {
             format!(
                 "`{}`",
                 md_target
@@ -2516,6 +2575,7 @@ fn default_settings(root: &Path) -> AppSettings {
             .to_string(),
         model: DEFAULT_MODEL.to_string(),
         run_mode: "download_transcribe".to_string(),
+        theme: "light".to_string(),
         transcript_format: "txt_markdown".to_string(),
         prompt_preset: "default".to_string(),
         ffmpeg_path: String::new(),
@@ -2541,11 +2601,8 @@ fn sanitize_settings(root: &Path, settings: AppSettings) -> AppSettings {
             settings.model.trim().to_string()
         },
         run_mode: normalize_run_mode_value(&settings.run_mode),
-        transcript_format: if settings.transcript_format.trim().is_empty() {
-            defaults.transcript_format
-        } else {
-            settings.transcript_format.trim().to_string()
-        },
+        theme: normalize_theme_value(&settings.theme),
+        transcript_format: normalized_transcript_format(&settings.transcript_format).to_string(),
         prompt_preset: if settings.prompt_preset.trim().is_empty() {
             defaults.prompt_preset
         } else {
@@ -2580,6 +2637,23 @@ fn normalize_run_mode_value(value: &str) -> String {
         "download_only" => "download_only".to_string(),
         "transcribe_existing" => "transcribe_existing".to_string(),
         _ => "download_transcribe".to_string(),
+    }
+}
+
+fn normalize_theme_value(value: &str) -> String {
+    match value.trim() {
+        "system" => "system".to_string(),
+        "light" => "light".to_string(),
+        "dark" => "dark".to_string(),
+        _ => "light".to_string(),
+    }
+}
+
+fn normalized_transcript_format(value: &str) -> &'static str {
+    match value.trim() {
+        "txt" => "txt",
+        "markdown" => "markdown",
+        _ => "txt_markdown",
     }
 }
 
@@ -2645,6 +2719,7 @@ fn main() {
             save_settings,
             save_api_key,
             api_key_ready,
+            default_source_summary,
             check_downloader,
             install_downloader,
             update_downloader,
@@ -2695,6 +2770,20 @@ mod tests {
     }
 
     #[test]
+    fn default_source_summary_reports_drive_links_when_present() {
+        let drive_links = legacy_root().join("Drive links.txt");
+        if !drive_links.exists() {
+            return;
+        }
+
+        let summary = default_source_summary()
+            .expect("default source summary")
+            .expect("summary exists");
+        assert_eq!(summary.label, "Drive links.txt");
+        assert_eq!(summary.link_count, 22);
+    }
+
+    #[test]
     fn extract_urls_dedupes_messy_text() {
         let text = r#"first (https://drive.google.com/file/d/abc/view), second https://youtu.be/video1. again https://youtu.be/video1"#;
         let urls = extract_urls(text);
@@ -2713,6 +2802,31 @@ mod tests {
             preview_inputs(vec![media.to_string_lossy().to_string()]).expect("preview local media");
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].title, "Sample Lecture");
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn transcript_format_markdown_only_writes_markdown() {
+        let temp = unique_temp_dir("lecturescribe-format-test");
+        fs::create_dir_all(&temp).expect("temp dir");
+        let media = temp.join("Sample Lecture.mp3");
+        fs::write(&media, b"sample").expect("sample media");
+        let item = MediaItem {
+            number: 1,
+            title: "Sample Lecture".to_string(),
+            source: "local".to_string(),
+            media_path: media,
+            item_id: "sample".to_string(),
+        };
+        let mut settings = default_settings(&legacy_root());
+        settings.transcript_format = "markdown".to_string();
+
+        write_transcript(&temp, &item, &settings, &[(1, 0, "hello world".to_string())])
+            .expect("write transcript");
+
+        assert!(!final_path(&temp, &item).exists());
+        assert!(markdown_path(&temp, &item).exists());
+        assert!(transcript_outputs_complete(&temp, &item, &settings));
         let _ = fs::remove_dir_all(temp);
     }
 

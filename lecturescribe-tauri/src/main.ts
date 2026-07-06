@@ -47,6 +47,7 @@ type AppSettings = {
   work_dir: string;
   model: string;
   run_mode: string;
+  theme: string;
   transcript_format: string;
   prompt_preset: string;
   ffmpeg_path: string;
@@ -64,6 +65,12 @@ type SourceEntry = {
   value: string;
   label: string;
   count?: number;
+};
+
+type DefaultSourceSummary = {
+  path: string;
+  label: string;
+  link_count: number;
 };
 
 type EngineDone = {
@@ -112,6 +119,7 @@ const defaultSettings: AppSettings = {
   work_dir: "",
   model: "gemini-3.1-flash-lite",
   run_mode: "download_transcribe",
+  theme: "light",
   transcript_format: "txt_markdown",
   prompt_preset: "default",
   ffmpeg_path: "",
@@ -126,6 +134,7 @@ const defaultSettings: AppSettings = {
 
 const state = {
   sources: [] as SourceEntry[],
+  autoSource: null as DefaultSourceSummary | null,
   queue: [] as QueueItem[],
   activeRunIds: [] as string[],
   environment: null as EnvironmentStatus | null,
@@ -143,6 +152,7 @@ const state = {
   toasts: [] as Toast[],
   lastSummary: null as RunSummary | null,
   runStartedAt: 0,
+  runTotal: 0,
   settingsMessage: "",
   sourceNotice: "Add links, a .txt file, or local media. The queue updates automatically.",
   previewNotice: "Preview is automatic. If no sources are added, LectureScribe can use Drive links.txt.",
@@ -180,6 +190,9 @@ const icons: Record<string, string> = {
   alert: `<svg viewBox="0 0 24 24"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>`,
   open: `<svg viewBox="0 0 24 24"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>`,
   retry: `<svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15.3-6.4"/><path d="M18 2v4h-4"/><path d="M21 12a9 9 0 0 1-15.3 6.4"/><path d="M6 22v-4h4"/></svg>`,
+  sun: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>`,
+  moon: `<svg viewBox="0 0 24 24"><path d="M21 14.7A8 8 0 0 1 9.3 3a7 7 0 1 0 11.7 11.7Z"/></svg>`,
+  monitor: `<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>`,
 };
 
 function icon(name: string): string {
@@ -201,10 +214,11 @@ function render() {
         </div>
         <div class="top-actions">
           ${setupPillsHtml()}
-          <button class="ghost" data-action="open-setup">${icon("shield")} Setup</button>
-          <button class="ghost" data-action="open-output">${icon("folder")} Open output</button>
-          <button class="ghost" data-action="run-setup-test" ${state.setupTesting || state.running ? "disabled" : ""}>${icon("shield")} Test setup</button>
-          <button class="ghost" data-action="open-settings">${icon("gear")} Settings</button>
+          ${themeButtonHtml()}
+          <button class="ghost" data-action="open-setup" title="Open first-run setup and tool fixes">${icon("shield")} Setup</button>
+          <button class="ghost" data-action="open-output" title="Open the transcript output folder">${icon("folder")} Open output</button>
+          <button class="ghost" data-action="run-doctor" title="Check API key, FFmpeg, Downloader, and output folder" ${state.running ? "disabled" : ""}>${icon("shield")} Doctor</button>
+          <button class="ghost" data-action="open-settings" title="Open advanced settings, history, and logs">${icon("gear")} Settings</button>
         </div>
       </header>
 
@@ -222,9 +236,9 @@ function render() {
               <p>${selected} selected, ${visibleQueue.length} visible${state.previewing ? " - updating preview" : ""}</p>
             </div>
             <div class="queue-actions">
-              <button class="small-button secondary" data-action="select-all" ${state.queue.length === 0 || state.running ? "disabled" : ""}>Select all</button>
-              <button class="small-button secondary" data-action="select-none" ${state.queue.length === 0 || state.running ? "disabled" : ""}>Select none</button>
-              <button class="icon-button" data-action="preview" aria-label="Refresh preview" ${state.previewing || state.running ? "disabled" : ""}>${icon("refresh")}</button>
+              <button class="small-button secondary" data-action="select-all" title="${state.running ? "Selection is locked while a run is active." : "Select all visible queue items."}" ${state.queue.length === 0 || state.running ? "disabled" : ""}>Select all</button>
+              <button class="small-button secondary" data-action="select-none" title="${state.running ? "Selection is locked while a run is active." : "Unselect all visible queue items."}" ${state.queue.length === 0 || state.running ? "disabled" : ""}>Select none</button>
+              <button class="icon-button" data-action="preview" aria-label="Refresh preview" title="${previewButtonTitle()}" ${state.previewing || state.running ? "disabled" : ""}>${icon("refresh")}</button>
             </div>
           </div>
           <div class="queue-tools">
@@ -255,7 +269,7 @@ function render() {
         <div class="phase">${escapeHtml(state.phase)}</div>
         <div class="muted current" title="${escapeHtml(state.current)}">${escapeHtml(state.current)}</div>
         <div class="divider"></div>
-        <div class="metric">${icon("list")} ${escapeHtml(state.itemProgress)}</div>
+        <div class="metric" title="Selected run count is separate from the full queue count.">${icon("list")} ${escapeHtml(progressItemText())}</div>
         <div class="divider"></div>
         <div class="metric">${icon("film")} ${escapeHtml(state.chunks)}</div>
         <div class="divider"></div>
@@ -289,12 +303,12 @@ function addSourcesContent(): string {
   return `
     <div class="source-dropzone" data-dropzone>
       <div class="action-pair">
-        <button class="primary" data-action="paste" ${state.running ? "disabled" : ""}>${icon("link")} Paste links</button>
-        <button class="secondary" data-action="add-media" ${state.running ? "disabled" : ""}>${icon("folder")} Add media</button>
+        <button class="primary" data-action="paste" title="${state.running ? "Sources are locked while a run is active." : "Paste YouTube, Google Drive, or local media paths."}" ${state.running ? "disabled" : ""}>${icon("link")} Paste links</button>
+        <button class="secondary" data-action="add-media" title="${state.running ? "Sources are locked while a run is active." : "Add local audio or video files."}" ${state.running ? "disabled" : ""}>${icon("folder")} Add media</button>
       </div>
       <div class="source-tools">
-        <button class="text-button" data-action="add-link-file" ${state.running ? "disabled" : ""}>${icon("upload")} Add .txt link file</button>
-        <button class="text-button" data-action="clear-sources" ${state.sources.length === 0 || state.running ? "disabled" : ""}>Clear sources</button>
+        <button class="text-button" data-action="add-link-file" title="Add a text file and immediately count its links." ${state.running ? "disabled" : ""}>${icon("upload")} Add .txt link file</button>
+        <button class="text-button" data-action="clear-sources" title="${state.running ? "Sources are locked while a run is active." : "Clear manual sources, automatic source preview, and queue."}" ${(state.sources.length === 0 && !state.autoSource) || state.running ? "disabled" : ""}>Clear sources</button>
       </div>
       <p class="drop-hint">Drag files here, or use the buttons above.</p>
     </div>
@@ -304,14 +318,16 @@ function addSourcesContent(): string {
 }
 
 function previewContent(): string {
+  const selected = selectedQueueItems().length;
+  const previewLabel = state.running ? "Preview locked while running" : state.previewing ? "Updating preview..." : "Preview now";
   return `
-    <button class="wide secondary" data-action="preview" ${state.previewing || state.running ? "disabled" : ""}>${icon("eye")} ${state.previewing ? "Updating preview..." : "Preview now"}</button>
+    <button class="wide secondary" data-action="preview" title="${previewButtonTitle()}" ${state.previewing || state.running ? "disabled" : ""}>${icon("eye")} ${previewLabel}</button>
     <div class="hint-grid">
       <div><strong>${state.queue.length}</strong><span>items found</span></div>
-      <div><strong>${selectedQueueItems().length}</strong><span>selected</span></div>
+      <div><strong>${selected}</strong><span>selected</span></div>
       <div><strong>${duplicateHintCount()}</strong><span>duplicates skipped</span></div>
     </div>
-    ${sourceNoticeHtml(state.previewNotice)}
+    ${sourceNoticeHtml(previewNoticeText())}
   `;
 }
 
@@ -319,29 +335,129 @@ function startContent(): string {
   const mode = state.settings.run_mode || "download_transcribe";
   if (state.running) {
     return `
-      <button class="wide danger" data-action="cancel" ${state.cancelling ? "disabled" : ""}>${icon("stop")} ${state.cancelling ? "Cancelling..." : "Cancel run"}</button>
+      <div class="run-estimate active">${escapeHtml(modeLabel(mode))} - ${escapeHtml(progressItemText())}</div>
+      <button class="wide danger" data-action="cancel" title="Stops after the current safe step. Completed downloads and chunks stay cached." ${state.cancelling ? "disabled" : ""}>${icon("stop")} ${state.cancelling ? "Cancelling..." : "Cancel run"}</button>
       <p class="notice-line">Current work stops at the next safe point. Completed chunks stay cached.</p>
     `;
   }
 
   const hasFailures = failedQueueItems().length > 0;
   const selected = selectedQueueItems().length;
+  const disabledReason = startDisabledReason();
   return `
     <div class="mode-tabs" role="tablist" aria-label="Run mode">
-      ${runModeButton("download_transcribe", "Download + transcribe", mode)}
-      ${runModeButton("download_only", "Download only", mode)}
-      ${runModeButton("transcribe_existing", "Transcribe media", mode)}
+      ${runModeButton("download_transcribe", "Download + transcribe", mode, "Download links, then transcribe with Gemini.")}
+      ${runModeButton("download_only", "Download only", mode, "Download link media without using Gemini.")}
+      ${runModeButton("transcribe_existing", "Transcribe existing media", mode, "Use already downloaded or local media files.")}
     </div>
-    <button class="wide primary" data-action="start" ${state.previewing || (state.queue.length > 0 && selected === 0) ? "disabled" : ""}>${icon("play")} Start transcription</button>
+    <div class="run-estimate">${escapeHtml(runEstimateText())}</div>
+    <button class="wide primary" data-action="start" title="${escapeHtml(disabledReason || `Start ${modeLabel(mode).toLowerCase()} for selected queue items.`)}" ${disabledReason ? "disabled" : ""}>${icon("play")} ${startButtonLabel()}</button>
     <div class="start-actions">
-      <button class="small-button secondary" data-action="retry-failed" ${hasFailures ? "" : "disabled"}>${icon("retry")} Retry failed</button>
+      <button class="small-button secondary" data-action="retry-failed" title="Retries failed rows and reuses cached downloads/chunks when possible." ${hasFailures ? "" : "disabled"}>${icon("retry")} Retry failed</button>
       <button class="small-button secondary" data-action="open-output">${icon("folder")} Output folder</button>
     </div>
   `;
 }
 
-function runModeButton(value: string, label: string, active: string): string {
-  return `<button type="button" class="mode-tab ${value === active ? "active" : ""}" data-action="set-run-mode" data-run-mode="${value}">${escapeHtml(label)}</button>`;
+function runModeButton(value: string, label: string, active: string, title: string): string {
+  return `<button type="button" class="mode-tab ${value === active ? "active" : ""}" data-action="set-run-mode" data-run-mode="${value}" title="${escapeHtml(title)}">${escapeHtml(label)}</button>`;
+}
+
+function modeLabel(mode = state.settings.run_mode): string {
+  if (mode === "download_only") return "Download only";
+  if (mode === "transcribe_existing") return "Transcribe existing media";
+  return "Download + transcribe";
+}
+
+function outputFormatLabel(): string {
+  if (state.settings.transcript_format === "txt") return "TXT only";
+  if (state.settings.transcript_format === "markdown") return "Markdown only";
+  return "TXT + Markdown";
+}
+
+function startButtonLabel(): string {
+  if (state.settings.run_mode === "download_only") return "Start download";
+  return "Start transcription";
+}
+
+function startDisabledReason(): string {
+  if (state.previewing) return "Preview is still updating.";
+  if (state.queue.length > 0 && selectedQueueItems().length === 0) return "Select at least one queue item first.";
+  return "";
+}
+
+function runEstimateText(): string {
+  const selected = selectedQueueItems();
+  if (!state.queue.length) return "Preview runs first. Add sources or use an automatic link file.";
+  if (!selected.length) return "No rows selected. Select one or more queue items to start.";
+  const estimated = selected.reduce((sum, item) => sum + (item.estimated_chunks || 0), 0);
+  const chunks = estimated ? `about ${estimated} chunk${estimated === 1 ? "" : "s"}` : "chunks estimated on start";
+  const gemini = state.settings.run_mode === "download_only" ? "Gemini not used" : "Gemini will be used";
+  return `${selected.length} selected - ${chunks} - ${outputFormatLabel()} - ${gemini}`;
+}
+
+function previewNoticeText(): string {
+  if (!state.queue.length) return state.previewNotice;
+  return `${state.queue.length} found - ${selectedQueueItems().length} selected - ${duplicateHintCount()} duplicates skipped. ${state.previewNotice}`;
+}
+
+function previewButtonTitle(): string {
+  if (state.running) return "Preview is locked while a run is active.";
+  if (state.previewing) return "Preview is updating.";
+  return state.sources.length ? "Refresh the queue from current sources." : "Preview sources or auto-load Drive links.txt / links.txt.";
+}
+
+function progressItemText(): string {
+  if (state.running) return state.itemProgress;
+  if (state.queue.length) return `${selectedQueueItems().length} / ${state.queue.length} selected`;
+  return "0 selected";
+}
+
+function doctorSummaryText(): string {
+  const env = state.environment;
+  if (!env) return "Doctor has not checked setup yet.";
+  const fixes = [];
+  if (!env.api_key_ok) fixes.push("save a Gemini API key");
+  if (!env.ffmpeg.ok) fixes.push("install or choose FFmpeg");
+  if (!env.yt_dlp.ok) fixes.push("install or choose Downloader for links");
+  if (!fixes.length) return "Doctor passed: API key, FFmpeg, Downloader, and output folder are ready.";
+  return `Doctor found setup work: ${fixes.join(", ")}.`;
+}
+
+function themeButtonHtml(): string {
+  const current = themePreference();
+  const next = nextThemePreference(current);
+  const label = themeLabel(current);
+  const title = `Theme: ${label}. Click to switch to ${themeLabel(next)}.`;
+  return `
+    <button class="ghost theme-toggle" data-action="cycle-theme" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">
+      ${icon(themeIcon(current))}
+    </button>
+  `;
+}
+
+function themePreference(): "system" | "light" | "dark" {
+  const value = state.settings.theme;
+  if (value === "system" || value === "dark") return value;
+  return "light";
+}
+
+function nextThemePreference(value = themePreference()): "system" | "light" | "dark" {
+  if (value === "system") return "light";
+  if (value === "light") return "dark";
+  return "system";
+}
+
+function themeLabel(value = themePreference()): string {
+  if (value === "light") return "Light";
+  if (value === "dark") return "Dark";
+  return "System";
+}
+
+function themeIcon(value = themePreference()): string {
+  if (value === "light") return "sun";
+  if (value === "dark") return "moon";
+  return "monitor";
 }
 
 function setupPillsHtml(): string {
@@ -415,13 +531,20 @@ function sourceSummaryHtml(): string {
   const textLinks = state.sources.filter((source) => source.kind === "links").reduce((sum, source) => sum + (source.count ?? 0), 0);
   const media = state.sources.filter((source) => source.kind === "media").length;
   const hasSources = state.sources.length > 0;
+  const auto = !hasSources ? state.autoSource : null;
+  const title = hasSources ? `${state.sources.length} source groups added` : auto ? "Automatic source loaded" : "No sources yet";
+  const detail = hasSources
+    ? `${pasted} pasted links, ${textFiles} text files${textLinks ? ` (${textLinks} links)` : ""}, ${media} media files.`
+    : auto
+      ? `${auto.label}: ${auto.link_count} link${auto.link_count === 1 ? "" : "s"} found automatically.`
+      : "Add links, a .txt file, or local media. Preview can also load Drive links.txt.";
   return `
-    <div class="source-summary ${hasSources ? "has-sources" : ""}">
+    <div class="source-summary ${hasSources || auto ? "has-sources" : ""}">
       <div>
-        <strong>${hasSources ? `${state.sources.length} source groups added` : "No manual sources yet"}</strong>
-        <span>${pasted} pasted links, ${textFiles} text files${textLinks ? ` (${textLinks} links)` : ""}, ${media} media files.</span>
+        <strong>${escapeHtml(title)}</strong>
+        <span>${escapeHtml(detail)}</span>
       </div>
-      ${hasSources ? `<span class="mini-pill">${state.sources.length}</span>` : ""}
+      ${hasSources ? `<span class="mini-pill">${state.sources.length}</span>` : auto ? `<span class="mini-pill">${auto.link_count}</span>` : ""}
     </div>
     <div class="source-list main-source-list">${sourceListHtml("main")}</div>
   `;
@@ -564,16 +687,26 @@ function settingsDialogHtml(): string {
         <div class="settings-grid">
           <section class="settings-section">
             <div class="section-head">
-              <h4>Setup status</h4>
-              <button type="button" class="text-button" data-action="refresh-environment">Refresh</button>
+              <h4>Doctor</h4>
+              <button type="button" class="text-button" data-action="run-doctor">Run doctor</button>
             </div>
             <div class="tool-grid">${toolStatusHtml()}</div>
+            <p class="notice-line">${escapeHtml(doctorSummaryText())}</p>
             <button type="button" class="compact-button secondary" data-action="run-setup-test" ${state.setupTesting || state.running ? "disabled" : ""}>${icon("shield")} Run setup test</button>
             <p class="notice-line">${escapeHtml(state.setupNotice || "The setup test uses one Gemini request.")}</p>
           </section>
 
           <section class="settings-section">
-            <h4>API key</h4>
+            <h4>Appearance and API key</h4>
+            <label class="field-stack">
+              <span>Theme</span>
+              <select data-setting="theme">
+                <option value="system" ${s.theme === "system" ? "selected" : ""}>System</option>
+                <option value="light" ${s.theme === "light" ? "selected" : ""}>Light</option>
+                <option value="dark" ${s.theme === "dark" ? "selected" : ""}>Dark</option>
+              </select>
+              <small>System follows your Windows light or dark preference.</small>
+            </label>
             <label class="field-stack">
               <span>Gemini API key</span>
               <div class="inline-field">
@@ -611,6 +744,14 @@ function settingsDialogHtml(): string {
                 <option value="download_transcribe" ${s.run_mode === "download_transcribe" ? "selected" : ""}>Download + transcribe</option>
                 <option value="download_only" ${s.run_mode === "download_only" ? "selected" : ""}>Download only</option>
                 <option value="transcribe_existing" ${s.run_mode === "transcribe_existing" ? "selected" : ""}>Transcribe existing media</option>
+              </select>
+            </label>
+            <label class="field-stack">
+              <span>Transcript format</span>
+              <select data-setting="transcript_format">
+                <option value="txt_markdown" ${s.transcript_format === "txt_markdown" ? "selected" : ""}>TXT + Markdown</option>
+                <option value="txt" ${s.transcript_format === "txt" ? "selected" : ""}>TXT only</option>
+                <option value="markdown" ${s.transcript_format === "markdown" ? "selected" : ""}>Markdown only</option>
               </select>
             </label>
             <label class="field-stack">
@@ -760,7 +901,19 @@ function queueRowsHtml(): string {
 
 function sourceListHtml(mode: "main" | "settings" = "settings"): string {
   if (!state.sources.length) {
-    const message = mode === "main" ? "No manual sources added. Preview can still use Drive links.txt." : "No sources added.";
+    if (mode === "main" && state.autoSource) {
+      return `
+        <div class="source-group">
+          <div class="source-group-title">Automatic link file <span>1</span></div>
+          <div class="source-row">
+            <strong>auto</strong>
+            <span title="${escapeHtml(state.autoSource.path)}">${escapeHtml(state.autoSource.label)} (${state.autoSource.link_count} link${state.autoSource.link_count === 1 ? "" : "s"})</span>
+            <button type="button" class="remove-button" data-action="clear-sources" aria-label="Clear automatic source preview">${icon("close")}</button>
+          </div>
+        </div>
+      `;
+    }
+    const message = mode === "main" ? "No sources added. Add links, media, or preview a local link file." : "No sources added.";
     return `<p class="muted">${message}</p>`;
   }
   const groups: Array<[SourceKind, string]> = [
@@ -865,7 +1018,9 @@ function wireEvents() {
   document.querySelector('[data-action="open-settings"]')?.addEventListener("click", openSettings);
   document.querySelectorAll('[data-action="close-settings"]').forEach((button) => button.addEventListener("click", closeSettings));
   document.querySelectorAll('[data-action="open-output"]').forEach((button) => button.addEventListener("click", () => void openOutputFolder()));
+  document.querySelectorAll('[data-action="cycle-theme"]').forEach((button) => button.addEventListener("click", () => void cycleTheme()));
   document.querySelectorAll('[data-action="run-setup-test"]').forEach((button) => button.addEventListener("click", () => void runSetupTest()));
+  document.querySelectorAll('[data-action="run-doctor"]').forEach((button) => button.addEventListener("click", () => void runDoctor()));
   document.querySelectorAll('[data-action="save-api-key"]').forEach((button) => button.addEventListener("click", () => void saveApiKeyFromDialog()));
   document.querySelectorAll('[data-action="save-settings"]').forEach((button) => button.addEventListener("click", () => void saveAppSettings(true)));
   document.querySelectorAll('[data-action="install-downloader"]').forEach((button) => button.addEventListener("click", () => void installDownloader()));
@@ -908,7 +1063,9 @@ function wireEvents() {
   document.querySelector('[data-action="clear-sources"]')?.addEventListener("click", () => {
     state.sources = [];
     state.queue = [];
+    state.autoSource = null;
     state.activeRunIds = [];
+    state.runTotal = 0;
     resetProgress();
     state.sourceNotice = "Sources cleared.";
     state.previewNotice = "Add sources or click Preview to load Drive links.txt if it exists.";
@@ -1027,6 +1184,7 @@ async function loadEnvironment() {
 async function loadAppSettings() {
   try {
     state.settings = await invoke<AppSettings>("load_settings");
+    applyTheme();
   } catch (error) {
     const message = friendlyError("Settings unavailable", error);
     state.settingsMessage = message;
@@ -1168,11 +1326,12 @@ async function startTranscription() {
   state.speed = "0 KB/s";
   state.percent = "0%";
   state.activeRunIds = selected.map((item) => item.id);
+  state.runTotal = selected.length;
   selected.forEach((item) => {
     item.status = item.status === "Done" ? "Ready" : item.status;
   });
   state.totalItems = selected.length;
-  state.itemProgress = `0 / ${selected.length} items`;
+  state.itemProgress = `0 / ${selected.length} selected`;
   render();
 
   try {
@@ -1237,6 +1396,14 @@ async function loadPreview(): Promise<QueueItem[]> {
   return invoke<QueueItem[]>("preview_inputs", { inputs: currentInputs() });
 }
 
+async function loadDefaultSourceSummary(): Promise<DefaultSourceSummary | null> {
+  try {
+    return await invoke<DefaultSourceSummary | null>("default_source_summary");
+  } catch {
+    return null;
+  }
+}
+
 async function previewAfterSourceChange() {
   await runPreview("Auto");
 }
@@ -1252,15 +1419,17 @@ async function runPreview(mode: "Auto" | "Manual") {
   try {
     const next = await loadPreview();
     state.queue = mergePreviewSelection(next);
+    state.autoSource = currentInputs().length === 0 && state.queue.length ? await loadDefaultSourceSummary() : null;
     state.phase = "Idle";
     state.current = state.queue.length ? "Queue preview ready." : "No transcriptable items found.";
     state.totalItems = state.queue.length;
     state.completedItems = 0;
-    state.itemProgress = `0 / ${state.queue.length} items`;
+    state.runTotal = 0;
+    state.itemProgress = state.queue.length ? `${selectedQueueItems().length} / ${state.queue.length} selected` : "0 selected";
     state.chunks = "0 / 0 chunks";
     state.percent = "0%";
     state.previewNotice = state.queue.length
-      ? `Preview ready: ${state.queue.length} item${state.queue.length === 1 ? "" : "s"} found, ${selectedQueueItems().length} selected.`
+      ? "Queue ready. Start processes selected rows only."
       : "Preview found 0 items. Add links, a .txt link file, or media files.";
   } catch (error) {
     const message = friendlyError("Preview failed", error);
@@ -1337,13 +1506,13 @@ async function exportBugReport() {
     `Generated: ${new Date().toISOString()}`,
     "",
     "Setup:",
-    JSON.stringify(state.environment, null, 2),
+    redactSensitive(JSON.stringify(state.environment, null, 2)),
     "",
     "Settings (sanitized):",
-    JSON.stringify(safeSettings, null, 2),
+    redactSensitive(JSON.stringify(safeSettings, null, 2)),
     "",
     "Recent logs:",
-    state.logs.slice(-80).join("\n") || "(none)",
+    redactSensitive(state.logs.slice(-80).join("\n") || "(none)"),
   ].join("\n");
   try {
     await navigator.clipboard.writeText(report);
@@ -1472,6 +1641,10 @@ function updateSettingFromInput(input: HTMLInputElement | HTMLSelectElement) {
     state.settings.run_mode = input.value;
     state.settings.skip_download = input.value === "transcribe_existing";
   }
+  if (key === "theme") {
+    state.settings.theme = input.value;
+    applyTheme();
+  }
   if (key === "prompt_preset") state.settings.prompt_preset = input.value;
   if (key === "transcript_format") state.settings.transcript_format = input.value;
   if (key === "cookies_from_browser") state.settings.cookies_from_browser = input.value;
@@ -1491,10 +1664,26 @@ async function saveAppSettings(showMessage: boolean) {
   syncSettingsFromForm();
   try {
     state.settings = await invoke<AppSettings>("save_settings", { settings: state.settings });
+    applyTheme();
     if (showMessage) state.settingsMessage = "Settings saved.";
     await loadEnvironmentWithoutRender();
   } catch (error) {
     state.settingsMessage = String(error);
+  }
+  render();
+}
+
+async function cycleTheme() {
+  state.settings.theme = nextThemePreference();
+  applyTheme();
+  render();
+
+  try {
+    state.settings = await invoke<AppSettings>("save_settings", { settings: state.settings });
+    applyTheme();
+  } catch (error) {
+    state.settingsMessage = friendlyError("Could not save theme", error);
+    toast("warning", state.settingsMessage);
   }
   render();
 }
@@ -1541,6 +1730,21 @@ function setupNeedsAttention(): boolean {
   return !env.api_key_ok || !env.ffmpeg.ok || !env.yt_dlp.ok;
 }
 
+async function runDoctor() {
+  if (state.running) return;
+  await loadEnvironmentWithoutRender();
+  const summary = doctorSummaryText();
+  state.setupNotice = summary;
+  state.settingsMessage = summary;
+  if (setupNeedsAttention()) {
+    state.wizardOpen = true;
+    toast("warning", "Doctor found setup items to fix.");
+  } else {
+    toast("success", "Doctor check passed.");
+  }
+  render();
+}
+
 async function setupEngineEvents() {
   try {
     await listen<string>("engine-line", (event) => handleEngineLine(event.payload));
@@ -1583,10 +1787,11 @@ function setupDropZone() {
 
 function handleEngineProgress(progress: EngineProgress) {
   state.phase = progress.phase || state.phase;
-  state.current = progress.message || state.current;
-  state.totalItems = progress.total_items || state.totalItems;
+  state.current = friendlyProgressMessage(progress.message || state.current, progress.total_items);
+  state.totalItems = progress.total_items || state.runTotal || state.totalItems;
+  state.runTotal = progress.total_items || state.runTotal;
   state.completedItems = progress.completed_items;
-  state.itemProgress = `${progress.completed_items} / ${progress.total_items || state.totalItems || 0} items`;
+  state.itemProgress = `${progress.completed_items} / ${progress.total_items || state.runTotal || state.totalItems || 0} selected`;
   state.chunks = `${progress.chunk_current} / ${progress.chunk_total} chunks`;
   state.speed = progress.download_speed || "0 KB/s";
   state.percent = `${Math.round(progress.percent)}%`;
@@ -1600,15 +1805,17 @@ function handleEngineLine(line: string) {
 
   const found = line.match(/\[\+\] Found (\d+) media item/);
   if (found) {
-    state.totalItems = Number(found[1]);
-    state.itemProgress = `${state.completedItems} / ${state.totalItems} items`;
+    state.runTotal = Number(found[1]);
+    state.totalItems = state.runTotal;
+    state.itemProgress = `${state.completedItems} / ${state.runTotal} selected`;
     state.phase = "Running";
   }
 
   const downloading = line.match(/\[\+\] Downloading (\d+) URL/);
   if (downloading) {
     state.phase = "Downloading";
-    state.current = `Downloading ${downloading[1]} item(s)`;
+    state.runTotal = Number(downloading[1]) || state.runTotal;
+    state.current = `Preparing download for ${downloading[1]} selected link${downloading[1] === "1" ? "" : "s"}`;
   }
 
   const downloadProgress = line.match(/\[download\]\s+([0-9.]+)%.*?at\s+([^\s]+\/s)/);
@@ -1623,7 +1830,7 @@ function handleEngineLine(line: string) {
     const runNumber = Number(transcribing[1]);
     state.currentItem = runNumber;
     state.phase = "Transcribing";
-    state.current = transcribing[2];
+    state.current = `Transcribing selected item ${runNumber} of ${state.runTotal || state.activeRunIds.length || transcribing[1]}: ${transcribing[2]}`;
     state.chunks = `0 / ${transcribing[3]} chunks`;
     updateQueueStatus(runNumber, "Running");
   }
@@ -1713,8 +1920,15 @@ function queueItemForRunNumber(runNumber: number): QueueItem | undefined {
 
 function updateOverallProgress() {
   const total = state.totalItems || state.activeRunIds.length || state.queue.length || state.completedItems || 1;
-  state.itemProgress = `${state.completedItems} / ${total} items`;
+  state.itemProgress = `${state.completedItems} / ${total} selected`;
   state.percent = `${Math.round((state.completedItems / total) * 100)}%`;
+}
+
+function friendlyProgressMessage(message: string, totalItems: number): string {
+  const download = message.match(/^Downloading(?: selected item)?\s+(\d+)\/(\d+)$/);
+  if (download) return `Downloading selected item ${download[1]} of ${download[2]}`;
+  if (message === "Downloading" && totalItems) return `Downloading selected items (${totalItems})`;
+  return message;
 }
 
 function mergePreviewSelection(next: QueueItem[]): QueueItem[] {
@@ -1855,7 +2069,8 @@ function resetProgress() {
   state.completedItems = 0;
   state.totalItems = 0;
   state.currentItem = 0;
-  state.itemProgress = "0 / 0 items";
+  state.runTotal = 0;
+  state.itemProgress = "0 selected";
   state.chunks = "0 / 0 chunks";
   state.percent = "0%";
   state.speed = "0 KB/s";
@@ -1992,6 +2207,32 @@ function safePercent(value: string): string {
   return /^\d+%$/.test(value) ? value : "0%";
 }
 
+function redactSensitive(value: string): string {
+  return value
+    .replace(/(GEMINI_API_KEY|GOOGLE_API_KEY)\s*=\s*["']?[^"'\s]+/gi, "$1=[redacted]")
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, "[redacted-api-key]")
+    .replace(/AQ\.[0-9A-Za-z_-]{20,}/g, "[redacted-token]")
+    .replace(/("api[_-]?key"\s*:\s*")[^"]+(")/gi, "$1[redacted]$2");
+}
+
+function applyTheme() {
+  const preference = themePreference();
+  const media = window.matchMedia?.("(prefers-color-scheme: dark)");
+  const dark = preference === "dark" || (preference === "system" && Boolean(media?.matches));
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  document.documentElement.dataset.themePreference = preference;
+  document.documentElement.style.colorScheme = dark ? "dark" : "light";
+}
+
+function setupThemeListener() {
+  const media = window.matchMedia?.("(prefers-color-scheme: dark)");
+  media?.addEventListener("change", () => {
+    if (themePreference() === "system") {
+      applyTheme();
+    }
+  });
+}
+
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => {
     const escaped: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" };
@@ -2009,6 +2250,8 @@ if (!isTauriRuntime()) {
   state.previewNotice = "The browser page is only for visual preview; desktop features need the Tauri app window.";
 }
 
+applyTheme();
+setupThemeListener();
 render();
 void loadAppSettings();
 void loadEnvironment();
