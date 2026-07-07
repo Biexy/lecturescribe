@@ -2642,9 +2642,8 @@ fn normalize_run_mode_value(value: &str) -> String {
 
 fn normalize_theme_value(value: &str) -> String {
     match value.trim() {
-        "system" => "system".to_string(),
-        "light" => "light".to_string(),
         "dark" => "dark".to_string(),
+        "light" | "system" => "light".to_string(),
         _ => "light".to_string(),
     }
 }

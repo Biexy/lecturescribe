@@ -192,7 +192,6 @@ const icons: Record<string, string> = {
   retry: `<svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15.3-6.4"/><path d="M18 2v4h-4"/><path d="M21 12a9 9 0 0 1-15.3 6.4"/><path d="M6 22v-4h4"/></svg>`,
   sun: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>`,
   moon: `<svg viewBox="0 0 24 24"><path d="M21 14.7A8 8 0 0 1 9.3 3a7 7 0 1 0 11.7 11.7Z"/></svg>`,
-  monitor: `<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>`,
 };
 
 function icon(name: string): string {
@@ -211,10 +210,10 @@ function render() {
             <h1>LectureScribe</h1>
             <p>Community lecture transcription</p>
           </div>
+          ${themeButtonHtml()}
         </div>
         <div class="top-actions">
           ${setupPillsHtml()}
-          ${themeButtonHtml()}
           <button class="ghost" data-action="open-setup" title="Open first-run setup and tool fixes">${icon("shield")} Setup</button>
           <button class="ghost" data-action="open-output" title="Open the transcript output folder">${icon("folder")} Open output</button>
           <button class="ghost" data-action="run-doctor" title="Check API key, FFmpeg, Downloader, and output folder" ${state.running ? "disabled" : ""}>${icon("shield")} Doctor</button>
@@ -427,8 +426,7 @@ function doctorSummaryText(): string {
 function themeButtonHtml(): string {
   const current = themePreference();
   const next = nextThemePreference(current);
-  const label = themeLabel(current);
-  const title = `Theme: ${label}. Click to switch to ${themeLabel(next)}.`;
+  const title = `Switch to ${themeLabel(next)} mode`;
   return `
     <button class="ghost theme-toggle" data-action="cycle-theme" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">
       ${icon(themeIcon(current))}
@@ -436,28 +434,25 @@ function themeButtonHtml(): string {
   `;
 }
 
-function themePreference(): "system" | "light" | "dark" {
+function themePreference(): "light" | "dark" {
   const value = state.settings.theme;
-  if (value === "system" || value === "dark") return value;
+  if (value === "dark") return value;
   return "light";
 }
 
-function nextThemePreference(value = themePreference()): "system" | "light" | "dark" {
-  if (value === "system") return "light";
+function nextThemePreference(value = themePreference()): "light" | "dark" {
   if (value === "light") return "dark";
-  return "system";
+  return "light";
 }
 
 function themeLabel(value = themePreference()): string {
-  if (value === "light") return "Light";
   if (value === "dark") return "Dark";
-  return "System";
+  return "Light";
 }
 
 function themeIcon(value = themePreference()): string {
-  if (value === "light") return "sun";
-  if (value === "dark") return "moon";
-  return "monitor";
+  if (value === "light") return "moon";
+  return "sun";
 }
 
 function setupPillsHtml(): string {
@@ -701,11 +696,10 @@ function settingsDialogHtml(): string {
             <label class="field-stack">
               <span>Theme</span>
               <select data-setting="theme">
-                <option value="system" ${s.theme === "system" ? "selected" : ""}>System</option>
-                <option value="light" ${s.theme === "light" ? "selected" : ""}>Light</option>
-                <option value="dark" ${s.theme === "dark" ? "selected" : ""}>Dark</option>
+                <option value="light" ${themePreference() === "light" ? "selected" : ""}>Light</option>
+                <option value="dark" ${themePreference() === "dark" ? "selected" : ""}>Dark</option>
               </select>
-              <small>System follows your Windows light or dark preference.</small>
+              <small>Use the header icon for a quick Light/Dark switch.</small>
             </label>
             <label class="field-stack">
               <span>Gemini API key</span>
@@ -2217,20 +2211,10 @@ function redactSensitive(value: string): string {
 
 function applyTheme() {
   const preference = themePreference();
-  const media = window.matchMedia?.("(prefers-color-scheme: dark)");
-  const dark = preference === "dark" || (preference === "system" && Boolean(media?.matches));
+  const dark = preference === "dark";
   document.documentElement.dataset.theme = dark ? "dark" : "light";
   document.documentElement.dataset.themePreference = preference;
   document.documentElement.style.colorScheme = dark ? "dark" : "light";
-}
-
-function setupThemeListener() {
-  const media = window.matchMedia?.("(prefers-color-scheme: dark)");
-  media?.addEventListener("change", () => {
-    if (themePreference() === "system") {
-      applyTheme();
-    }
-  });
 }
 
 function escapeHtml(value: string): string {
@@ -2251,7 +2235,6 @@ if (!isTauriRuntime()) {
 }
 
 applyTheme();
-setupThemeListener();
 render();
 void loadAppSettings();
 void loadEnvironment();
