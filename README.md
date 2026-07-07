@@ -19,7 +19,7 @@ It supports YouTube links, Google Drive file links, `.txt` link lists, and local
 1. Download and install the latest Windows release.
 2. Open LectureScribe.
 3. Follow the first-run setup wizard:
-   - add your Gemini API key,
+   - add your Gemini API key from [Google AI Studio](https://aistudio.google.com/app/apikey),
    - confirm FFmpeg,
    - confirm Downloader,
    - choose an output folder,
@@ -29,9 +29,21 @@ It supports YouTube links, Google Drive file links, `.txt` link lists, and local
 
 The setup test uses one tiny Gemini request to verify the key, FFmpeg audio path, and Gemini request path.
 
-## Gemini API Key
+## Get Your Gemini API Key
 
-LectureScribe uses your own Gemini API key. You can create one in [Google AI Studio](https://aistudio.google.com/app/apikey).
+LectureScribe uses your own Gemini API key. The easiest place to get one is:
+
+**[Get a Gemini API key in Google AI Studio](https://aistudio.google.com/app/apikey)**
+
+Basic steps:
+
+1. Sign in with your Google account.
+2. Click **Create API key**.
+3. Create the key in a new project if you do not already have one.
+4. Copy the key into LectureScribe's Setup screen.
+5. Run **Test setup** in the app.
+
+Google's official guide is here: [Using Gemini API keys](https://ai.google.dev/gemini-api/docs/api-key).
 
 `gemini-3.1-flash-lite` is the recommended default because it is easy to select in AI Studio and is intended to be a lighter, cost-conscious model. Google rate limits and free-tier terms can change, so check the current Google documentation for exact limits.
 
