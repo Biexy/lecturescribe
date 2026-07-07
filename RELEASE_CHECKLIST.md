@@ -16,6 +16,8 @@
 - Confirm `scripts/fetch-yt-dlp.ps1` downloaded `lecturescribe-tauri\src-tauri\resources\yt-dlp.exe`.
 - Confirm the generated installer detects the bundled Downloader on first run.
 - Confirm missing FFmpeg opens the setup wizard with install/choose actions.
+- Build the portable ZIP from the release executable and bundled resources.
+- Confirm the portable ZIP contains `LectureScribe.exe`, `resources\yt-dlp.exe`, `README-PORTABLE.txt`, `LICENSE`, and `THIRD_PARTY_NOTICES.md`.
 
 ## Smoke Test
 
@@ -27,3 +29,4 @@
 - Verify `.txt`, `.md`, and `00_index.md` outputs.
 - Verify retry failed and cancel do not duplicate successful transcripts.
 - Verify sanitized bug report export does not include secrets.
+- Unzip the portable package into a clean folder and confirm the bundled Downloader is present.

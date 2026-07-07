@@ -1,8 +1,20 @@
 # LectureScribe
 
-LectureScribe is a local-first desktop app for turning lecture videos and audio into organized transcripts.
+LectureScribe is a local-first desktop app for turning videos and audio into organized transcripts.
 
 It supports YouTube links, Google Drive file links, `.txt` link lists, and local audio/video files. The app previews the queue before starting, skips duplicates, tracks progress, and writes clean transcript files plus an index.
+
+[Download the latest Windows release](https://github.com/Biexy/lecturescribe/releases/latest)
+
+![LectureScribe main window](docs/assets/lecturescribe-main.png)
+
+## Why LectureScribe?
+
+- Batch transcribe videos or audio from links, text files, or local media.
+- Preview and select exactly what will run before spending Gemini requests.
+- Resume/retry with cached downloads and chunks.
+- No account, subscription, Python setup, or command line required for normal users.
+- Local-first: your files stay on your computer, and audio chunks are sent to Gemini only during transcription.
 
 ## Highlights
 
@@ -16,7 +28,9 @@ It supports YouTube links, Google Drive file links, `.txt` link lists, and local
 
 ## Quick Start
 
-1. Download and install the latest Windows release.
+1. Download the latest Windows release:
+   - **Windows Installer** is recommended for most users.
+   - **Portable ZIP** is available if you do not want to install the app.
 2. Open LectureScribe.
 3. Follow the first-run setup wizard:
    - add your Gemini API key from [Google AI Studio](https://aistudio.google.com/app/apikey),
@@ -28,6 +42,15 @@ It supports YouTube links, Google Drive file links, `.txt` link lists, and local
 5. Review the queue and start.
 
 The setup test uses one tiny Gemini request to verify the key, FFmpeg audio path, and Gemini request path.
+
+## Downloads
+
+| Download | Best for |
+| --- | --- |
+| [Windows Installer](https://github.com/Biexy/lecturescribe/releases/latest) | Most users. Installs LectureScribe normally. |
+| [Portable ZIP](https://github.com/Biexy/lecturescribe/releases/latest) | Users who want to unzip and run without an installer. |
+
+Both versions need your Gemini API key and FFmpeg for transcription. The Downloader is bundled with release builds.
 
 ## Get Your Gemini API Key
 
@@ -128,6 +151,7 @@ The old Python implementation is archived in `archive/python-legacy/` for refere
 - **Missing FFmpeg**: use Setup -> Install FFmpeg, or choose an existing `ffmpeg.exe`.
 - **Private Drive/YouTube links fail**: add browser cookies in Advanced settings.
 - **Downloader missing**: release builds include it; Setup can also install or update it.
+- **Portable ZIP does not download links**: make sure `resources\yt-dlp.exe` is still beside `LectureScribe.exe`.
 - **Repeated transcript text**: retry with Force disabled first so cached successful chunks are reused.
 
 ## Project

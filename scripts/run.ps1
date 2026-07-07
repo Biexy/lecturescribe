@@ -1,7 +1,7 @@
 param()
 
 $ErrorActionPreference = "Stop"
-$Root = $PSScriptRoot
+$Root = Split-Path -Parent $PSScriptRoot
 $TauriDir = Join-Path $Root "lecturescribe-tauri"
 $ReleaseExe = Join-Path $TauriDir "src-tauri\target\release\lecturescribe.exe"
 $DebugExe = Join-Path $TauriDir "src-tauri\target\debug\lecturescribe.exe"

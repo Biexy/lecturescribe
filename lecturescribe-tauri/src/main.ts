@@ -208,7 +208,7 @@ function render() {
           <div class="brand-mark">${icon("file")}</div>
           <div>
             <h1>LectureScribe</h1>
-            <p>Community lecture transcription</p>
+            <p>Community video & audio transcription</p>
           </div>
           ${themeButtonHtml()}
         </div>
@@ -223,9 +223,9 @@ function render() {
 
       <section class="workspace">
         <aside class="source-panel">
-          ${workflowCard(1, "Add sources", addSourcesContent(), "YouTube, Google Drive, .txt link files, and local audio/video.")}
-          ${workflowCard(2, "Preview and choose", previewContent(), "The queue updates automatically. Uncheck anything you do not want to transcribe.")}
-          ${workflowCard(3, "Start", startContent(), "Transcripts, cached chunks, and the index are saved in your output folder.", true)}
+          ${workflowCard(1, "Add sources", addSourcesContent(), "YouTube, Drive, .txt, or local media.")}
+          ${workflowCard(2, "Preview and choose", previewContent(), "Uncheck anything you do not want.")}
+          ${workflowCard(3, "Start", startContent(), "Saved in your output folder.", true)}
         </aside>
 
         <section class="queue-card">
@@ -397,7 +397,7 @@ function runEstimateText(): string {
 
 function previewNoticeText(): string {
   if (!state.queue.length) return state.previewNotice;
-  return `${state.queue.length} found - ${selectedQueueItems().length} selected - ${duplicateHintCount()} duplicates skipped. ${state.previewNotice}`;
+  return `${state.queue.length} found - ${selectedQueueItems().length} selected - ${duplicateHintCount()} duplicates skipped.`;
 }
 
 function previewButtonTitle(): string {
@@ -429,7 +429,8 @@ function themeButtonHtml(): string {
   const title = `Switch to ${themeLabel(next)} mode`;
   return `
     <button class="ghost theme-toggle" data-action="cycle-theme" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">
-      ${icon(themeIcon(current))}
+      <span class="theme-toggle-option ${current === "light" ? "active" : ""}" aria-hidden="true">${icon("sun")}</span>
+      <span class="theme-toggle-option ${current === "dark" ? "active" : ""}" aria-hidden="true">${icon("moon")}</span>
     </button>
   `;
 }
@@ -448,11 +449,6 @@ function nextThemePreference(value = themePreference()): "light" | "dark" {
 function themeLabel(value = themePreference()): string {
   if (value === "dark") return "Dark";
   return "Light";
-}
-
-function themeIcon(value = themePreference()): string {
-  if (value === "light") return "moon";
-  return "sun";
 }
 
 function setupPillsHtml(): string {
@@ -541,7 +537,7 @@ function sourceSummaryHtml(): string {
       </div>
       ${hasSources ? `<span class="mini-pill">${state.sources.length}</span>` : auto ? `<span class="mini-pill">${auto.link_count}</span>` : ""}
     </div>
-    <div class="source-list main-source-list">${sourceListHtml("main")}</div>
+    ${hasSources ? `<div class="source-list main-source-list">${sourceListHtml("main")}</div>` : ""}
   `;
 }
 
@@ -766,10 +762,10 @@ function settingsDialogHtml(): string {
             <label class="field-stack">
               <span>Prompt preset</span>
               <select data-setting="prompt_preset">
-                <option value="default" ${s.prompt_preset === "default" ? "selected" : ""}>Default lecture</option>
-                <option value="arabic_lecture" ${s.prompt_preset === "arabic_lecture" ? "selected" : ""}>Arabic lecture</option>
-                <option value="english_lecture" ${s.prompt_preset === "english_lecture" ? "selected" : ""}>English lecture</option>
-                <option value="technical_math" ${s.prompt_preset === "technical_math" ? "selected" : ""}>Technical/math lecture</option>
+                <option value="default" ${s.prompt_preset === "default" ? "selected" : ""}>Default transcript</option>
+                <option value="arabic_lecture" ${s.prompt_preset === "arabic_lecture" ? "selected" : ""}>Arabic audio/video</option>
+                <option value="english_lecture" ${s.prompt_preset === "english_lecture" ? "selected" : ""}>English audio/video</option>
+                <option value="technical_math" ${s.prompt_preset === "technical_math" ? "selected" : ""}>Technical/math content</option>
               </select>
             </label>
             <label class="check-row">

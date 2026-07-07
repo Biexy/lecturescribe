@@ -2,7 +2,7 @@
 
 ## Near Term
 
-- Add a preflight command that checks Python, FFmpeg, yt-dlp, API key, and write permissions.
+- Add deeper Doctor checks for FFmpeg, Downloader, Gemini API key, output folder write permissions, and portable package health.
 - Add a real progress file with per-video and per-chunk state.
 - Add cleaner terminal progress using one status line per video.
 - Add export formats: `.txt`, `.md`, `.srt`, and `.docx`.

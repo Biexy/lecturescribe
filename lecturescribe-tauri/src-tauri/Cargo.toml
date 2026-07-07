@@ -1,7 +1,7 @@
 [package]
 name = "lecturescribe"
-version = "0.1.0"
-description = "Small native lecture transcription app"
+version = "0.1.1"
+description = "Small native video and audio transcription app"
 authors = ["LectureScribe contributors"]
 edition = "2021"
 

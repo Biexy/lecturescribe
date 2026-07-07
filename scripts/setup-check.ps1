@@ -1,7 +1,7 @@
 param()
 
 $ErrorActionPreference = "Stop"
-$Root = $PSScriptRoot
+$Root = Split-Path -Parent $PSScriptRoot
 
 Write-Host "LectureScribe desktop setup is handled inside the app."
 Write-Host "Normal users should run the installer, open LectureScribe, and follow the first-run wizard."
