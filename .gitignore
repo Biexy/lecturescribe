@@ -34,6 +34,7 @@ desktop.ini
 _pasted_links*.txt
 lecturescribe-tauri/node_modules/
 lecturescribe-tauri/dist/
+lecturescribe-tauri/.smoke/
 lecturescribe-tauri/src-tauri/target/
 lecturescribe-tauri/src-tauri/gen/
 

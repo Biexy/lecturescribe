@@ -29,3 +29,15 @@ Google API usage is governed by Google's terms, pricing, and rate limits.
 ## Tauri, Rust, and npm dependencies
 
 The desktop app is built with Tauri, Rust crates, and npm packages. See `lecturescribe-tauri/Cargo.lock` and `lecturescribe-tauri/package-lock.json` for dependency versions.
+
+## React, React Reconciler, and Scheduler
+
+LectureScribe includes React, React Reconciler, and Scheduler, each distributed
+under the MIT License.
+
+Copyright (c) Meta Platforms, Inc. and affiliates.
+
+The complete MIT license text for each package is included in its vendored
+`LICENSE` file under `lecturescribe-tauri/vendor/`.
+
+https://github.com/facebook/react

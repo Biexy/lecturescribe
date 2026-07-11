@@ -1,0 +1,29 @@
+[package]
+name = "lecturescribe-adapters"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
+keyring = { version = "3", features = ["windows-native"] }
+lecturescribe-core = { path = "../lecturescribe-core" }
+lecturescribe-engine = { path = "../lecturescribe-engine" }
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Power",
+  "Win32_System_Threading",
+] }
+
+[dev-dependencies]

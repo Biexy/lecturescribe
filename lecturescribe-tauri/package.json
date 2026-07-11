@@ -1,19 +1,25 @@
 {
   "name": "lecturescribe",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
     "build": "npm run bundle:downloader && tauri build",
     "bundle:downloader": "powershell -ExecutionPolicy Bypass -File ..\\scripts\\fetch-yt-dlp.ps1",
     "dev:frontend": "vite --host 127.0.0.1 --port 1420",
-    "build:frontend": "tsc && vite build",
-    "preview": "vite preview"
+    "build:frontend": "tsc && node_modules\\@esbuild\\win32-x64\\esbuild.exe src\\main.tsx --bundle --format=esm --platform=browser --target=es2022 --outdir=dist --minify && copy /Y index.production.html dist\\index.html > nul",
+    "build:frontend:vite": "tsc && vite build",
+    "preview": "vite preview",
+    "test:frontend": "node --experimental-strip-types --test --test-isolation=none tests/*.test.ts",
+    "check": "npm run test:frontend && npm run build:frontend"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
-    "@tauri-apps/plugin-dialog": "^2.0.0"
+    "@tauri-apps/plugin-dialog": "^2.0.0",
+    "react": "file:vendor/react",
+    "react-reconciler": "file:vendor/react-reconciler",
+    "scheduler": "file:vendor/scheduler"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",

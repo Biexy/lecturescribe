@@ -1,0 +1,20 @@
+pub mod credentials;
+pub mod diagnostics;
+pub mod downloader;
+pub mod gemini;
+pub mod media;
+pub mod paths;
+pub mod pipeline;
+pub mod process;
+pub mod sources;
+pub mod tools;
+pub mod transcript;
+
+pub use credentials::CredentialStore;
+pub use diagnostics::{DiagnosticReport, TraceLogger};
+pub use downloader::{download, DownloadRequest, DownloadResult};
+pub use gemini::{GeminiClient, SegmentTranscript};
+pub use paths::AppPaths;
+pub use pipeline::PipelineExecutor;
+pub use sources::SourceInspector;
+pub use tools::{ResolvedTool, ResolvedTools, ToolResolver};
