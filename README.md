@@ -2,7 +2,7 @@
 
 LectureScribe is a local-first Windows app for downloading media and turning audio or video into organized transcripts. It handles single files and large queues without a Python runtime or command-line setup.
 
-[Download the latest release](https://github.com/Biexy/lecturescribe/releases/latest) | [Report a bug](https://github.com/Biexy/lecturescribe/issues/new/choose) | [View the roadmap](ROADMAP.md)
+[Download the latest release](https://github.com/Biexy/lecturescribe/releases/latest) | [Report a bug](https://github.com/Biexy/lecturescribe/issues/new/choose)
 
 ![LectureScribe with two local media files ready to transcribe](docs/assets/lecturescribe-main.png)
 
