@@ -122,6 +122,11 @@ impl Store {
                         }
                     })
                     .unwrap_or_else(|| "Empty run".to_string());
+                let output_dir = if plan.batch_output_dir.trim().is_empty() {
+                    plan.settings.output_dir.clone()
+                } else {
+                    plan.batch_output_dir.clone()
+                };
                 Ok(HistoryEntry {
                     job_id,
                     started_at,
@@ -129,7 +134,7 @@ impl Store {
                     mode: plan.mode,
                     title,
                     counts,
-                    output_dir: plan.settings.output_dir,
+                    output_dir,
                     state,
                 })
             })

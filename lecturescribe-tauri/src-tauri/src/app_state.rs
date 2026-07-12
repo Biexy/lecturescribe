@@ -33,6 +33,7 @@ impl AppState {
         store.save_settings(&settings)?;
 
         let credentials = CredentialStore;
+        let api_key_verified = credentials.gemini_key_verified();
         let tools = ToolResolver::new(paths.clone());
         let inspector = SourceInspector::new(store.clone(), tools.clone());
         let gemini = GeminiClient::new(credentials.clone())?;
@@ -57,7 +58,7 @@ impl AppState {
             inspector,
             runner,
             logger,
-            api_key_verified: AtomicBool::new(false),
+            api_key_verified: AtomicBool::new(api_key_verified),
             controls: Mutex::new(HashMap::new()),
         })
     }

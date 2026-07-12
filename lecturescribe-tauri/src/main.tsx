@@ -1,6 +1,9 @@
+import { createRoot } from "react-dom/client";
 import { App } from "./App";
-import { createRoot } from "./runtime/dom-renderer";
 import "./styles.css";
+import "./styles/components.css";
+import "./styles/dialogs.css";
+import "./styles/responsive.css";
 
 const container = document.getElementById("app");
 

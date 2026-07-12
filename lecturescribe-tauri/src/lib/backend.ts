@@ -8,7 +8,10 @@ import type {
   EnvironmentSnapshot,
   HistoryEntry,
   JobSnapshot,
+  ModelOption,
+  ModelValidation,
   PreviewSnapshot,
+  RunOverrides,
   RunMode,
   RunPlan,
   SetupTestResult,
@@ -23,9 +26,24 @@ export interface PlanRequest {
   selected_item_ids: string[];
   mode: RunMode;
   settings: AppSettings;
+  overrides: RunOverrides;
 }
 
+export const isDesktopRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+const desktopPreviewError: AppError = {
+  code: "desktop_runtime_unavailable",
+  category: "setup",
+  severity: "warning",
+  user_message: "Desktop features are unavailable in this browser preview. Open the LectureScribe desktop app to add sources and run jobs.",
+  technical_detail: "The Tauri desktop bridge is not available in this browser context.",
+  retryable: false,
+  preserved_work: "No local files or settings were changed.",
+  recovery_actions: [],
+};
+
 export function normalizeError(error: unknown): AppError {
+  if (!isDesktopRuntime) return desktopPreviewError;
   if (typeof error === "object" && error && "user_message" in error) {
     return error as AppError;
   }
@@ -90,9 +108,15 @@ export const backend = {
   deleteApiKey: () => invoke<void>("delete_api_key"),
   checkEnvironment: () => invoke<EnvironmentSnapshot>("check_environment"),
   installDownloader: () => invoke<ToolStatus>("install_downloader"),
-  runSetupTest: () => invoke<SetupTestResult>("run_setup_test"),
+  listTranscriptionModels: (customModel: string | null = null) =>
+    invoke<ModelOption[]>("list_transcription_models", { customModel }),
+  validateTranscriptionModel: (model: string, runAudioTest = false) =>
+    invoke<ModelValidation>("validate_transcription_model", { model, runAudioTest }),
+  runSetupTest: (model: string | null = null) =>
+    invoke<SetupTestResult>("run_setup_test", { model }),
 
   openOutputFolder: () => invoke<string>("open_output_folder"),
+  openJobOutput: (jobId: string) => invoke<string>("open_job_output", { jobId }),
   openKnownLink: (target: "ai_studio" | "github" | "ffmpeg" | "yt_dlp") =>
     invoke<string>("open_known_link", { target }),
   openArtifact: (
@@ -105,8 +129,10 @@ export const backend = {
   exportDiagnostics: (destination: string) =>
     invoke<{ path: string; report: unknown }>("export_diagnostics", { destination }),
 
-  onEvent: (handler: (event: AppEvent) => void): Promise<UnlistenFn> =>
-    listen<AppEvent>("lecturescribe-event", ({ payload }) => handler(payload)),
+  onEvent: (handler: (event: AppEvent) => void): Promise<UnlistenFn> => {
+    if (!isDesktopRuntime) return Promise.resolve(() => undefined);
+    return listen<AppEvent>("lecturescribe-event", ({ payload }) => handler(payload));
+  },
 };
 
 export function selectedTranscriptArtifact(formats: AppSettings["output_formats"]): ArtifactKind {

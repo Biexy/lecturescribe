@@ -6,10 +6,11 @@ import { AboutModal, ItemDrawer, SummaryModal } from "./components/dialogs/Produ
 import { PasteLinksModal } from "./components/dialogs/PasteLinksModal";
 import { PreflightModal } from "./components/dialogs/PreflightModal";
 import { SettingsModal } from "./components/dialogs/SettingsModal";
-import { SetupWizard } from "./components/dialogs/SetupWizard";
+import { SetupCenter } from "./components/dialogs/SetupCenter";
 import { ToastRegion } from "./components/ui";
 import { useAppController } from "./hooks/useAppController";
-import { itemSnapshots } from "./state/app-state";
+import { capabilityForSelection } from "./lib/setup";
+import { itemSnapshots, selectedItemIds } from "./state/app-state";
 
 export function App() {
   const controller = useAppController();
@@ -22,6 +23,10 @@ export function App() {
     settingsSaving,
     setupBusy,
     setupTest,
+    setupError,
+    modelOptions,
+    modelValidation,
+    modelBusy,
     actions,
   } = controller;
 
@@ -37,10 +42,14 @@ export function App() {
 
   const detailItem = state.preview?.items.find((item) => item.id === state.detailItemId) ?? null;
   const detailSnapshot = detailItem ? itemSnapshots(state.job).get(detailItem.id) : undefined;
+  const selectedIds = new Set(selectedItemIds(state));
+  const selectedItems = state.preview?.items.filter((item) => selectedIds.has(item.id)) ?? [];
+  const setupCapability = capabilityForSelection(state.mode, selectedItems);
 
   return (
     <div className="app-shell">
       <Header
+        capability={setupCapability}
         environment={state.environment}
         onAbout={() => dispatch({ type: "dialog", dialog: "about" })}
         onOpenOutput={() => void actions.openOutput()}
@@ -80,7 +89,7 @@ export function App() {
       <ActivityBar
         onCancel={() => void actions.cancelJob()}
         onExpand={(expanded) => dispatch({ type: "activity", expanded })}
-        onOpenOutput={() => void actions.openOutput()}
+        onOpenOutput={() => void actions.openOutput(state.job?.summary ? state.job.id : undefined)}
         onPause={() => void actions.pauseJob()}
         onResume={() => void actions.resumeJob()}
         onRetry={() => void actions.retryFailed()}
@@ -96,46 +105,48 @@ export function App() {
       />
 
       <PreflightModal
-        onClose={() => dispatch({ type: "dialog", dialog: null })}
-        onFixSetup={() => {
-          dispatch({ type: "setup_step", step: setupStepForPlan(state.plan?.blocking_errors[0]?.code) });
-          dispatch({ type: "dialog", dialog: "setup" });
-        }}
+        modelOptions={modelOptions}
+        onClose={actions.closeSetup}
+        onFixSetup={() => dispatch({ type: "dialog", dialog: "setup" })}
+        onRebuild={(overrides) => void actions.reviewPlan(overrides)}
         onStart={() => void actions.startPlan()}
         open={state.dialog === "preflight"}
         plan={state.plan}
+        rebuilding={state.planLoading}
         starting={starting}
       />
 
-      <SetupWizard
+      <SetupCenter
         busy={setupBusy}
         environment={state.environment}
+        focus={setupCapability}
         onCheck={() => void actions.refreshEnvironment()}
         onChooseFfmpeg={() => void actions.chooseFfmpeg()}
         onChooseOutput={() => void actions.chooseOutput()}
         onClose={() => dispatch({ type: "dialog", dialog: null })}
         onDeleteKey={() => void actions.deleteApiKey()}
+        onExportDiagnostics={() => void actions.exportDiagnostics()}
         onInstallDownloader={() => void actions.installDownloader()}
         onOpenLink={(target) => void actions.openLink(target)}
         onSaveKey={(key) => void actions.saveApiKey(key)}
-        onStep={(step) => dispatch({ type: "setup_step", step })}
         onTest={() => void actions.runSetupTest()}
         open={state.dialog === "setup"}
         settings={state.settings}
-        step={state.setupStep}
         testResult={setupTest}
+        testError={setupError}
       />
 
       <SettingsModal
         environment={state.environment}
+        modelBusy={modelBusy}
+        modelOptions={modelOptions}
+        modelValidation={modelValidation}
         onChooseOutput={() => void actions.chooseOutput()}
         onClose={() => dispatch({ type: "dialog", dialog: null })}
         onExportDiagnostics={() => void actions.exportDiagnostics()}
-        onOpenDiagnostics={() => {
-          dispatch({ type: "setup_step", step: 5 });
-          dispatch({ type: "dialog", dialog: "setup" });
-        }}
+        onOpenDiagnostics={() => dispatch({ type: "dialog", dialog: "setup" })}
         onSave={(settings) => void actions.saveSettings(settings)}
+        onValidateModel={(model) => void actions.validateTranscriptionModel(model)}
         open={state.dialog === "settings"}
         saving={settingsSaving}
         settings={state.settings}
@@ -151,7 +162,7 @@ export function App() {
       <SummaryModal
         job={state.job}
         onClose={() => dispatch({ type: "dialog", dialog: null })}
-        onOpenOutput={() => void actions.openOutput()}
+        onOpenOutput={() => void actions.openOutput(state.job?.id)}
         onRetry={() => void actions.retryFailed()}
         open={state.dialog === "summary"}
       />
@@ -172,12 +183,4 @@ export function App() {
       />
     </div>
   );
-}
-
-function setupStepForPlan(code?: string): number {
-  if (code?.includes("api_key")) return 1;
-  if (code?.includes("ffmpeg")) return 2;
-  if (code?.includes("downloader")) return 3;
-  if (code?.includes("output")) return 4;
-  return 5;
 }

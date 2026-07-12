@@ -453,7 +453,13 @@ fn temporary_path(path: &Path) -> PathBuf {
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("output");
-    path.with_file_name(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()))
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+    path.with_file_name(format!(".{name}.{}.tmp{extension}", uuid::Uuid::new_v4()))
 }
 
 fn atomic_replace(source: &Path, target: &Path) -> Result<(), AppError> {
@@ -489,6 +495,12 @@ fn filesystem_error(error: impl std::fmt::Display) -> AppError {
 mod tests {
     use super::*;
 
+    struct TestReporter;
+
+    impl ProgressReporter for TestReporter {
+        fn report(&self, _progress: ProgressMetric, _message: &str) {}
+    }
+
     #[test]
     fn silence_points_adjust_boundaries() {
         let boundaries = choose_boundaries(3700.0, 1200.0, &[1188.0, 2410.0]);
@@ -499,5 +511,71 @@ mod tests {
     fn ranges_add_overlap_without_exceeding_media() {
         let ranges = ranges_with_overlap(100.0, &[50.0], 2.0);
         assert_eq!(ranges, vec![(0.0, 52.0), (48.0, 100.0)]);
+    }
+
+    #[test]
+    fn temporary_media_paths_keep_the_target_extension() {
+        let audio = temporary_path(Path::new("normalized.mp3"));
+        let manifest = temporary_path(Path::new("segments.json"));
+
+        assert_eq!(
+            audio.extension().and_then(|value| value.to_str()),
+            Some("mp3")
+        );
+        assert_eq!(
+            manifest.extension().and_then(|value| value.to_str()),
+            Some("json")
+        );
+        assert_ne!(audio, PathBuf::from("normalized.mp3"));
+    }
+
+    #[test]
+    fn installed_ffmpeg_can_write_and_commit_normalized_audio() {
+        let root = std::env::temp_dir().join(format!(
+            "lecturescribe-normalize-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("input.wav");
+        let target = root.join("normalized.mp3");
+        let generated = std::process::Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1",
+                "-ar",
+                "16000",
+                "-ac",
+                "1",
+            ])
+            .arg(&source)
+            .status();
+        if !generated.is_ok_and(|status| status.success()) {
+            let _ = fs::remove_dir_all(root);
+            return;
+        }
+
+        normalize_audio(
+            Path::new("ffmpeg"),
+            &source,
+            &target,
+            1.0,
+            &JobControl::default(),
+            &TestReporter,
+        )
+        .unwrap();
+
+        assert!(fs::metadata(&target).is_ok_and(|value| value.len() > 0));
+        assert!(!root
+            .read_dir()
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".tmp")));
+        let _ = fs::remove_dir_all(root);
     }
 }

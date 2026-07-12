@@ -1,5 +1,6 @@
 import type { UiState } from "../state/app-state";
 import { isJobActive, selectedItemIds } from "../state/app-state";
+import { describeSelectedWork } from "../lib/setup";
 import type { RunMode, SourceFileSummary, SourceKind } from "../types/contracts";
 import { Icon } from "./Icon";
 import { Button, IconButton, SegmentedControl, StatusPill } from "./ui";
@@ -36,7 +37,10 @@ export function SourcePanel({
   onReview: () => void;
 }) {
   const active = isJobActive(state.job);
-  const selectedCount = selectedItemIds(state).length;
+  const selectedIds = new Set(selectedItemIds(state));
+  const selectedItems = state.preview?.items.filter((item) => selectedIds.has(item.id)) ?? [];
+  const selectedCount = selectedItems.length;
+  const selectedRemote = selectedItems.filter((item) => item.provider !== "local").length;
   const found = state.preview?.items.filter((item) => !item.duplicate_of).length ?? 0;
   const duplicates = state.preview?.duplicate_count ?? 0;
   const shownSources = state.sources.slice(0, 4);
@@ -47,6 +51,8 @@ export function SourcePanel({
       ? "Wait for the automatic preview to finish."
       : selectedCount === 0
         ? "Select at least one ready queue item."
+        : state.mode === "download" && selectedRemote === 0
+          ? "Download works with links. The selected files are already local."
         : undefined;
 
   return (
@@ -102,14 +108,10 @@ export function SourcePanel({
             {hiddenSources > 0 && <div className="more-sources">+{hiddenSources} more source groups</div>}
           </div>
         )}
-      </section>
-
-      <section className="source-section preview-section">
-        <div className="section-heading compact">
-          <div>
-            <span className="eyebrow">Queue</span>
-            <h2>Preview and choose</h2>
-          </div>
+        <div className="source-queue-summary">
+          <span><strong>{found}</strong> in queue</span>
+          <span><strong>{selectedCount}</strong> selected</span>
+          {duplicates > 0 && <span><strong>{duplicates}</strong> duplicates skipped</span>}
           <IconButton
             disabled={state.sources.length === 0 || state.previewLoading}
             icon="refresh"
@@ -118,20 +120,15 @@ export function SourcePanel({
             size="sm"
           />
         </div>
-        <div className="queue-metrics">
-          <Metric value={found} label="found" />
-          <Metric value={selectedCount} label="selected" />
-          <Metric value={duplicates} label="duplicates" />
-        </div>
-        <div className="preview-message" role="status">
+        <div className="source-status" role="status">
           {state.previewLoading ? (
             <><span className="spinner" /> Inspecting sources and media...</>
           ) : state.previewError ? (
             <><Icon name="alert" size={15} /> {state.previewError.user_message}</>
           ) : state.preview ? (
-            <><Icon name="check" size={15} /> Queue ready. Start uses selected rows only.</>
+            <><Icon name="check" size={15} /> Queue ready. Only selected rows will run.</>
           ) : (
-            <><Icon name="info" size={15} /> Preview updates automatically after you add a source.</>
+            <><Icon name="info" size={15} /> Preview updates automatically.</>
           )}
         </div>
       </section>
@@ -140,7 +137,7 @@ export function SourcePanel({
         <div className="section-heading compact">
           <div>
             <span className="eyebrow">Action</span>
-            <h2>Choose what to do</h2>
+            <h2>Selected action</h2>
           </div>
         </div>
         <SegmentedControl
@@ -152,10 +149,9 @@ export function SourcePanel({
           ]}
           value={state.mode}
         />
-        <div className="run-estimate">
-          <span>{selectedCount} selected</span>
-          <span>{state.mode === "transcribe" ? "Gemini used" : "No Gemini requests"}</span>
-          <span>{state.settings?.output_formats.map(formatLabel).join(" + ") ?? "TXT + Markdown"}</span>
+        <div className="run-summary">
+          <p>{describeSelectedWork(state.mode, selectedItems)}</p>
+          <span>{state.mode === "transcribe" ? `${state.settings?.output_formats.map(formatLabel).join(" + ") ?? "TXT + Markdown"} output` : "Original media output"}</span>
         </div>
         <Button
           className="review-button"
@@ -165,8 +161,9 @@ export function SourcePanel({
           title={disabledReason}
           variant="primary"
         >
-          {state.planLoading ? "Building plan..." : `Review ${state.mode}`}
+          {state.planLoading ? "Building plan..." : state.mode === "transcribe" ? "Review transcription" : "Review downloads"}
         </Button>
+        {disabledReason && <p className="disabled-reason"><Icon name="info" size={14} /> {disabledReason}</p>}
         {active && <StatusPill tone="info">A run is active. Progress is shown below.</StatusPill>}
       </section>
     </aside>
@@ -180,16 +177,12 @@ function SourceRow({ summary, active, onRemove }: { summary: SourceFileSummary; 
     <div className="source-row">
       <Icon name={icon} size={16} />
       <div>
-        <strong>{source.label || sourceLabels[source.kind]}</strong>
+        <strong dir="auto">{source.label || sourceLabels[source.kind]}</strong>
         <span>{count > 0 ? `${count} link${count === 1 ? "" : "s"}` : sourceLabels[source.kind]}{source.automatic ? " - automatic" : ""}</span>
       </div>
       <IconButton disabled={active} icon="x" label={`Remove ${source.label}`} onClick={() => onRemove(source.id)} size="sm" />
     </div>
   );
-}
-
-function Metric({ value, label }: { value: number; label: string }) {
-  return <div><strong>{value}</strong><span>{label}</span></div>;
 }
 
 function formatLabel(value: string): string {

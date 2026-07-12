@@ -13,16 +13,21 @@ import {
   type WorkspaceView,
 } from "../state/app-state";
 import type {
+  AppError,
   AppSettings,
   ArtifactKind,
   HistoryEntry,
+  ModelOption,
+  ModelValidation,
   RunMode,
+  RunOverrides,
   SetupTestResult,
   SourceFileSummary,
   SourceInput,
   SourceKind,
 } from "../types/contracts";
 import { countLinks } from "../components/dialogs/PasteLinksModal";
+import { CURATED_MODEL_OPTIONS } from "../components/settings/ModelChoice";
 import {
   humanizePreviewWarnings,
   playlistConfirmationMessage,
@@ -39,10 +44,15 @@ export function useAppController() {
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [setupBusy, setSetupBusy] = useState<string | null>(null);
   const [setupTest, setSetupTest] = useState<SetupTestResult | null>(null);
+  const [setupError, setSetupError] = useState<AppError | null>(null);
+  const [modelOptions, setModelOptions] = useState<ModelOption[]>(CURATED_MODEL_OPTIONS);
+  const [modelValidation, setModelValidation] = useState<ModelValidation | null>(null);
+  const [modelBusy, setModelBusy] = useState(false);
   const previewRequest = useRef(0);
   const jobRef = useRef(state.job);
   const snapshotTimer = useRef<number | null>(null);
   const completedJob = useRef<string | null>(null);
+  const modelCatalogLoaded = useRef(false);
 
   useEffect(() => {
     jobRef.current = state.job;
@@ -67,6 +77,9 @@ export function useAppController() {
           sources: automatic,
           unfinished: unfinished[0] ?? null,
         });
+        if (!environment.setup_complete && !setupIntroSeen()) {
+          dispatch({ type: "dialog", dialog: "setup" });
+        }
         dispatch({ type: "history", history });
         if (automatic.length > 0) {
           dispatch({
@@ -95,6 +108,15 @@ export function useAppController() {
     document.documentElement.dataset.theme = state.settings.theme;
     document.documentElement.style.colorScheme = state.settings.theme;
   }, [state.settings?.theme]);
+
+  useEffect(() => {
+    if (
+      state.dialog !== "settings"
+      || !state.environment?.api_key_configured
+      || modelCatalogLoaded.current
+    ) return;
+    void loadTranscriptionModels(state.settings?.model ?? null);
+  }, [state.dialog, state.environment?.api_key_configured, state.settings?.model]);
 
   useEffect(() => {
     if (state.booting || state.sources.length === 0) return;
@@ -310,24 +332,27 @@ export function useAppController() {
     dispatch({ type: "clear_sources" });
   }
 
-  async function reviewPlan() {
+  async function reviewPlan(overrides: RunOverrides = { batch_name: null, model_id: null }) {
     if (!state.preview || !state.settings) return;
     const ids = selectedItemIds(state);
     if (ids.length === 0) {
       dispatch({ type: "toast", toast: makeToast("warning", "Nothing selected", "Select at least one ready queue item.") });
       return;
     }
+    const previousPlan = state.plan;
     dispatch({ type: "plan_loading" });
     const request: PlanRequest = {
       preview_id: state.preview.id,
       selected_item_ids: ids,
       mode: state.mode,
       settings: state.settings,
+      overrides,
     };
     try {
       dispatch({ type: "plan_ready", plan: await backend.buildPlan(request) });
     } catch (error) {
-      dispatch({ type: "plan_clear" });
+      if (previousPlan) dispatch({ type: "plan_ready", plan: previousPlan });
+      else dispatch({ type: "plan_clear" });
       notify(error);
     }
   }
@@ -418,17 +443,28 @@ export function useAppController() {
 
   async function saveApiKey(apiKey: string) {
     setSetupBusy("key");
+    setSetupError(null);
+    setSetupTest(null);
     try {
       await backend.saveApiKey(apiKey);
+      const validation = await backend.validateTranscriptionModel(
+        state.settings?.model ?? "gemini-3.1-flash-lite",
+      );
+      setModelValidation(validation);
       await refreshEnvironment();
-      dispatch({ type: "toast", toast: makeToast("success", "API key saved", "Stored securely in Windows Credential Manager.") });
-    } catch (error) { notify(error); } finally { setSetupBusy(null); }
+      dispatch({ type: "toast", toast: makeToast("success", "API key verified", "Saved securely in Windows Credential Manager.") });
+    } catch (error) {
+      const problem = normalizeError(error);
+      setSetupError(problem);
+      await refreshEnvironment();
+      notify(error);
+    } finally { setSetupBusy(null); }
   }
 
   async function deleteApiKey() {
     if (!window.confirm("Remove the Gemini API key from Windows Credential Manager?")) return;
     setSetupBusy("key");
-    try { await backend.deleteApiKey(); await refreshEnvironment(); } catch (error) { notify(error); } finally { setSetupBusy(null); }
+    try { await backend.deleteApiKey(); setSetupError(null); await refreshEnvironment(); } catch (error) { notify(error); } finally { setSetupBusy(null); }
   }
 
   async function installDownloader() {
@@ -436,9 +472,56 @@ export function useAppController() {
     try { await backend.installDownloader(); await refreshEnvironment(); dispatch({ type: "toast", toast: makeToast("success", "Downloader ready", "The official pinned yt-dlp build passed checksum verification.") }); } catch (error) { notify(error); } finally { setSetupBusy(null); }
   }
 
-  async function runSetupTest() {
+  async function loadTranscriptionModels(customModel: string | null = null) {
+    setModelBusy(true);
+    try {
+      const options = await backend.listTranscriptionModels(customModel);
+      if (options.length > 0) setModelOptions(options);
+      modelCatalogLoaded.current = true;
+    } catch (error) {
+      const problem = normalizeError(error);
+      setModelValidation({
+        model_id: customModel ?? state.settings?.model ?? "",
+        availability: "unknown",
+        status: "unverified",
+        message: problem.user_message,
+        checked_at: null,
+      });
+    } finally {
+      setModelBusy(false);
+    }
+  }
+
+  async function validateTranscriptionModel(model: string, runAudioTest = false) {
+    setModelBusy(true);
+    try {
+      const validation = await backend.validateTranscriptionModel(model, runAudioTest);
+      setModelValidation(validation);
+      if (validation.status === "valid") {
+        await loadTranscriptionModels(model);
+      }
+      return validation;
+    } catch (error) {
+      const problem = normalizeError(error);
+      setModelValidation({
+        model_id: model,
+        availability: "unknown",
+        status: "invalid",
+        message: problem.user_message,
+        checked_at: null,
+      });
+      notify(error);
+      return null;
+    } finally {
+      setModelBusy(false);
+    }
+  }
+
+  async function runSetupTest(model: string | null = state.settings?.model ?? null) {
     setSetupBusy("test");
-    try { const result = await backend.runSetupTest(); setSetupTest(result); await refreshEnvironment(); dispatch({ type: "toast", toast: makeToast("success", "Setup test passed", result.message) }); } catch (error) { notify(error); } finally { setSetupBusy(null); }
+    setSetupError(null);
+    setSetupTest(null);
+    try { const result = await backend.runSetupTest(model); setSetupTest(result); await refreshEnvironment(); dispatch({ type: "toast", toast: makeToast("success", "Setup test passed", result.message) }); } catch (error) { const problem = normalizeError(error); setSetupError(problem); notify(error); } finally { setSetupBusy(null); }
   }
 
   async function refreshEnvironment() {
@@ -477,9 +560,21 @@ export function useAppController() {
     void backend.saveSettings(settings).catch(notify);
   }
 
+  function closeSetup() {
+    try {
+      window.localStorage.setItem("lecturescribe.setup.intro-seen", "1");
+    } catch {
+      // The setup center still closes if WebView storage is unavailable.
+    }
+    dispatch({ type: "dialog", dialog: null });
+  }
+
   function handleToastAction(toast: ToastMessage) {
     if (toast.action_id === "undo_source") dispatch({ type: "undo_remove_source" });
-    if (toast.action_id === "open_output") void backend.openOutputFolder();
+    if (toast.action_id === "open_output") {
+      const job = jobRef.current;
+      void (job?.summary ? backend.openJobOutput(job.id) : backend.openOutputFolder());
+    }
     dispatch({ type: "dismiss_toast", id: toast.id });
   }
 
@@ -492,6 +587,10 @@ export function useAppController() {
     settingsSaving,
     setupBusy,
     setupTest,
+    setupError,
+    modelOptions,
+    modelValidation,
+    modelBusy,
     actions: {
       addTextFiles,
       addMedia,
@@ -512,14 +611,17 @@ export function useAppController() {
       saveApiKey,
       deleteApiKey,
       installDownloader,
+      loadTranscriptionModels,
+      validateTranscriptionModel,
       runSetupTest,
       refreshEnvironment,
       openArtifact,
       openHistory,
       exportDiagnostics,
       setTheme,
+      closeSetup,
       handleToastAction,
-      openOutput: () => backend.openOutputFolder().catch(notify),
+      openOutput: (jobId?: string) => (jobId ? backend.openJobOutput(jobId) : backend.openOutputFolder()).catch(notify),
       openLink: (target: "ai_studio" | "github" | "ffmpeg" | "yt_dlp") => backend.openKnownLink(target).catch(notify),
       setMode: (mode: RunMode) => dispatch({ type: "mode", mode }),
       setWorkspace: (view: WorkspaceView) => dispatch({ type: "workspace", view }),
@@ -529,6 +631,14 @@ export function useAppController() {
       selectItems: (ids: string[], selected: boolean) => dispatch({ type: "select_items", ids, selected }),
     },
   };
+}
+
+function setupIntroSeen(): boolean {
+  try {
+    return window.localStorage.getItem("lecturescribe.setup.intro-seen") === "1";
+  } catch {
+    return false;
+  }
 }
 
 function normalizePaths(value: string | string[] | null): string[] {

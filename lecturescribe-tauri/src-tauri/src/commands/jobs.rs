@@ -87,6 +87,7 @@ pub async fn build_plan(
     let tools = state.tools.clone();
     let paths = state.paths.clone();
     let credentials = state.credentials.clone();
+    let api_key_verified = state.api_verified();
     blocking(move || {
         request.settings = paths.settings_with_defaults(request.settings);
         let preview = store.get_preview(&request.preview_id)?;
@@ -94,13 +95,12 @@ pub async fn build_plan(
         let output_ready =
             tools.output_writable(&PathBuf::from(request.settings.output_dir.clone()));
         let capabilities = PlanCapabilities {
-            api_key_ready: credentials.configured(),
+            api_key_ready: credentials.configured() && api_key_verified,
             ffmpeg_ready: resolved.ffmpeg.path.is_some() && resolved.ffprobe.path.is_some(),
             downloader_ready: resolved.downloader.path.is_some(),
             output_ready,
         };
         let plan = create_plan(&preview, request, capabilities)?;
-        store.save_settings(&plan.settings)?;
         store.save_plan(&plan)?;
         Ok(plan)
     })
@@ -169,6 +169,18 @@ pub fn resume_job(job_id: String, state: State<'_, AppState>) -> Result<JobSnaps
 
 #[tauri::command]
 pub fn cancel_job(job_id: String, state: State<'_, AppState>) -> Result<(), AppError> {
+    let snapshot = state.store.get_job_snapshot(&job_id)?;
+    if !matches!(
+        snapshot.state,
+        JobState::Planned | JobState::Running | JobState::Paused | JobState::Waiting
+    ) {
+        return Err(AppError::new(
+            "job_not_cancellable",
+            ErrorCategory::Input,
+            "This run can no longer be cancelled.",
+            format!("Job state was {:?}.", snapshot.state),
+        ));
+    }
     let control = state.control(&job_id).ok_or_else(|| {
         AppError::new(
             "job_control_missing",
@@ -177,6 +189,12 @@ pub fn cancel_job(job_id: String, state: State<'_, AppState>) -> Result<(), AppE
             "No live JobControl matched the requested job ID.",
         )
     })?;
+    state.store.set_job_state(
+        &job_id,
+        JobState::Cancelling,
+        "Cancellation requested",
+        None,
+    )?;
     control.cancel();
     Ok(())
 }

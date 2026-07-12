@@ -1,8 +1,10 @@
-import type { AppSettings, EnvironmentSnapshot } from "../types/contracts";
+import { capabilityLabel } from "../lib/setup";
+import type { AppSettings, EnvironmentSnapshot, SetupCapability } from "../types/contracts";
 import { Icon } from "./Icon";
-import { Button, IconButton, StatusPill } from "./ui";
+import { Button, IconButton } from "./ui";
 
 export function Header({
+  capability,
   settings,
   environment,
   onTheme,
@@ -11,6 +13,7 @@ export function Header({
   onAbout,
   onSettings,
 }: {
+  capability: SetupCapability | null;
   settings: AppSettings | null;
   environment: EnvironmentSnapshot | null;
   onTheme: () => void;
@@ -20,21 +23,25 @@ export function Header({
   onSettings: () => void;
 }) {
   const theme = settings?.theme ?? "light";
-  const setupTone = !environment
-    ? "neutral"
-    : environment.setup_complete
-      ? "success"
-      : "warning";
-  const setupLabel = !environment
+  const capabilityStatus = capability && environment ? environment.capabilities[capability] : null;
+  const setupReady = capability ? Boolean(capabilityStatus?.ready) : Boolean(environment?.setup_complete);
+  const setupStatus = !environment
     ? "Checking setup"
-    : environment.setup_complete
-      ? "Setup ready"
-      : `${environment.problems.length || 1} setup issue${environment.problems.length === 1 ? "" : "s"}`;
+    : !capability
+      ? environment.setup_complete ? "Ready" : "Review"
+      : capabilityStatus?.ready
+        ? "Ready"
+        : `${capabilityStatus?.blockers.length ?? 1} to fix`;
+  const setupTitle = !capability
+    ? "Open setup center"
+    : capabilityStatus?.ready
+      ? `${capabilityLabel(capability)} is ready`
+      : `Open setup for ${capabilityLabel(capability).toLowerCase()}`;
   return (
     <header className="app-header">
       <div className="brand-cluster">
         <div aria-hidden="true" className="brand-mark">
-          <Icon name="file" size={20} />
+          <Icon name="audio-lines" size={20} />
         </div>
         <div className="brand-copy">
           <h1>LectureScribe</h1>
@@ -48,21 +55,21 @@ export function Header({
       </div>
 
       <nav aria-label="Application" className="header-actions">
-        <button className="setup-indicator" onClick={onSetup} title="Open setup and diagnostics" type="button">
-          <StatusPill tone={setupTone}>
-            <Icon name={environment?.setup_complete ? "shield" : "wrench"} size={14} />
-            {setupLabel}
-          </StatusPill>
+        <button
+          className={`setup-indicator ${setupReady ? "is-ready" : environment ? "needs-attention" : ""}`}
+          onClick={onSetup}
+          title={setupTitle}
+          type="button"
+        >
+          <Icon name={setupReady ? "shield" : "wrench"} size={15} />
+          <span className="setup-label">Setup</span>
+          <span className="setup-status">{setupStatus}</span>
         </button>
         <Button icon="folder" onClick={onOpenOutput} size="sm" variant="ghost">
           Open output
         </Button>
-        <Button icon="help" onClick={onAbout} size="sm" variant="ghost">
-          Help &amp; About
-        </Button>
-        <Button icon="settings" onClick={onSettings} size="sm" variant="ghost">
-          Settings
-        </Button>
+        <IconButton icon="help" label="Help & About" onClick={onAbout} />
+        <IconButton icon="settings" label="Settings" onClick={onSettings} />
       </nav>
     </header>
   );

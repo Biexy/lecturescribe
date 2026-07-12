@@ -27,6 +27,7 @@ links.txt
 *.opus
 *.mov
 *.mkv
+*.docx
 
 # Local binaries and OS files
 yt-dlp.exe
@@ -37,6 +38,11 @@ lecturescribe-tauri/dist/
 lecturescribe-tauri/.smoke/
 lecturescribe-tauri/src-tauri/target/
 lecturescribe-tauri/src-tauri/gen/
+
+# Release artifacts are uploaded to GitHub Release, never committed.
+*.zip
+*.zip.sha256
+lecturescribe-tauri/src-tauri/target/release/bundle/portable/
 
 # Local one-off/legacy experiment scripts, not part of the native app
 drive_*.ps1

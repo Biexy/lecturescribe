@@ -1,23 +1,33 @@
 use crate::credentials::CredentialStore;
 use crate::media::SegmentDescriptor;
+use crate::models::{
+    curated_model_options, normalize_model_id, supported_model_validation, unavailable_model_error,
+    GeminiModelMetadata,
+};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use lecturescribe_core::{
-    AppError, AppSettings, ErrorCategory, ProgressKind, ProgressMetric, TranscriptSegment,
+    AppError, AppSettings, ErrorCategory, ModelOption, ModelValidation, ProgressKind,
+    ProgressMetric, TranscriptSegment,
 };
 use lecturescribe_engine::{JobControl, ProgressReporter};
 use reqwest::blocking::{Client, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const INLINE_RAW_LIMIT: u64 = 12 * 1024 * 1024;
+static MODEL_METADATA_CACHE: OnceLock<Mutex<Option<CachedModelMetadata>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SegmentTranscript {
     pub language: String,
+    #[serde(default)]
+    pub languages: Vec<String>,
     pub segments: Vec<TranscriptSegment>,
 }
 
@@ -38,6 +48,88 @@ impl GeminiClient {
         Ok(Self { credentials, http })
     }
 
+    pub fn list_transcription_models(
+        &self,
+        custom_model: Option<&str>,
+    ) -> Result<Vec<ModelOption>, AppError> {
+        let key = self.api_key()?;
+        let metadata = self.model_metadata(&key)?;
+        curated_model_options(&metadata, custom_model)
+    }
+
+    pub fn validate_transcription_model(&self, model: &str) -> Result<ModelValidation, AppError> {
+        let model = normalize_model_id(model);
+        if model.is_empty() {
+            return Err(unavailable_model_error(model.as_str(), false));
+        }
+        let key = self.api_key()?;
+        let metadata = self.model_metadata(&key)?;
+        let Some(entry) = metadata.iter().find(|entry| entry.id == model) else {
+            return Err(unavailable_model_error(&model, false));
+        };
+        if !entry.supports_generate_content() {
+            return Err(unavailable_model_error(&model, true));
+        }
+        supported_model_validation(&model)
+    }
+
+    fn api_key(&self) -> Result<String, AppError> {
+        self.credentials.gemini_key()?.ok_or_else(|| {
+            AppError::new(
+                "api_key_missing",
+                ErrorCategory::Authentication,
+                "Add a Gemini API key before using transcription models.",
+                "No Gemini credential was present in Windows Credential Manager.",
+            )
+            .with_action("open_setup_api", "Add API key", "open_setup_api")
+        })
+    }
+
+    fn model_metadata(&self, key: &str) -> Result<Vec<GeminiModelMetadata>, AppError> {
+        const MODEL_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+        let cache = MODEL_METADATA_CACHE.get_or_init(|| Mutex::new(None));
+        let key_fingerprint = hex::encode(Sha256::digest(key.as_bytes()));
+        if let Ok(cache) = cache.lock() {
+            if let Some(cache) = cache.as_ref().filter(|cache| {
+                cache.loaded_at.elapsed() < MODEL_CACHE_TTL
+                    && cache.key_fingerprint == key_fingerprint
+            }) {
+                return Ok(cache.models.clone());
+            }
+        }
+
+        let mut page_token = None::<String>;
+        let mut models = Vec::new();
+        loop {
+            let mut request = self
+                .http
+                .get("https://generativelanguage.googleapis.com/v1beta/models")
+                .header("x-goog-api-key", key);
+            if let Some(token) = &page_token {
+                request = request.query(&[("pageToken", token)]);
+            }
+            let response = request.send().map_err(network_error)?;
+            if !response.status().is_success() {
+                return Err(gemini_http_error(response).0);
+            }
+            let page: Value = response.json().map_err(network_error)?;
+            models.extend(parse_model_metadata(&page));
+            page_token = page["nextPageToken"].as_str().map(str::to_string);
+            if page_token.as_deref().map(str::is_empty).unwrap_or(true) {
+                break;
+            }
+        }
+
+        if let Ok(mut cache) = cache.lock() {
+            *cache = Some(CachedModelMetadata {
+                loaded_at: Instant::now(),
+                key_fingerprint,
+                models: models.clone(),
+            });
+        }
+        Ok(models)
+    }
+
     pub fn transcribe_segment(
         &self,
         descriptor: &SegmentDescriptor,
@@ -48,15 +140,7 @@ impl GeminiClient {
     ) -> Result<SegmentTranscript, AppError> {
         control.checkpoint()?;
         let path = Path::new(&descriptor.path);
-        let key = self.credentials.gemini_key()?.ok_or_else(|| {
-            AppError::new(
-                "api_key_missing",
-                ErrorCategory::Authentication,
-                "Add a Gemini API key before transcribing.",
-                "No Gemini credential was present in Windows Credential Manager.",
-            )
-            .with_action("open_setup_api", "Add API key", "open_setup_api")
-        })?;
+        let key = self.api_key()?;
         let mime_type = mime_for_audio(path);
         let mut remote_file = None;
         let audio_part = if fs::metadata(path).map_err(filesystem_error)?.len() <= INLINE_RAW_LIMIT
@@ -100,6 +184,10 @@ impl GeminiClient {
                     "type": "OBJECT",
                     "properties": {
                         "language": { "type": "STRING" },
+                        "languages": {
+                            "type": "ARRAY",
+                            "items": { "type": "STRING" }
+                        },
                         "segments": {
                             "type": "ARRAY",
                             "items": {
@@ -107,20 +195,18 @@ impl GeminiClient {
                                 "properties": {
                                     "start_seconds": { "type": "NUMBER" },
                                     "end_seconds": { "type": "NUMBER" },
-                                    "text": { "type": "STRING" }
+                                    "text": { "type": "STRING" },
+                                    "language_code": { "type": "STRING" }
                                 },
                                 "required": ["start_seconds", "text"]
                             }
                         }
                     },
-                    "required": ["language", "segments"]
+                    "required": ["segments"]
                 }
             }
         });
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
-            settings.model.trim_start_matches("models/")
-        );
+        let url = generate_content_url(&settings.model);
         reporter.report(
             ProgressMetric::indeterminate("request"),
             "Waiting for Gemini",
@@ -130,7 +216,6 @@ impl GeminiClient {
             let _ = self.delete_file(&key, &name);
         }
         let value = result?;
-        control.checkpoint()?;
         parse_transcript_response(&value, descriptor)
     }
 
@@ -400,6 +485,13 @@ impl GeminiClient {
     }
 }
 
+#[derive(Clone)]
+struct CachedModelMetadata {
+    loaded_at: Instant,
+    key_fingerprint: String,
+    models: Vec<GeminiModelMetadata>,
+}
+
 #[derive(Debug, Clone)]
 struct UploadedFile {
     name: String,
@@ -407,27 +499,95 @@ struct UploadedFile {
     mime_type: String,
 }
 
+fn parse_model_metadata(value: &Value) -> Vec<GeminiModelMetadata> {
+    value["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|model| {
+            let id = model["name"].as_str().map(normalize_model_id)?;
+            (!id.is_empty()).then(|| GeminiModelMetadata {
+                display_name: model["displayName"].as_str().unwrap_or(&id).to_string(),
+                description: model["description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                supported_generation_methods: model["supportedGenerationMethods"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect(),
+                id,
+            })
+        })
+        .collect()
+}
+
 fn build_prompt(descriptor: &SegmentDescriptor, title: &str, settings: &AppSettings) -> String {
     let preset = match settings.prompt_preset.as_str() {
         "arabic" | "arabic_lecture" => {
-            "Prefer clear Arabic while preserving spoken English technical terms."
+            "Arabic is expected. Preserve the spoken dialect, script, and any English or other code-switching exactly; do not translate or rewrite into Modern Standard Arabic."
         }
-        "english" | "english_lecture" => "Use clear English and preserve technical terms.",
+        "english" | "english_lecture" => {
+            "English is expected. Preserve technical terms and any speech in other languages exactly; do not translate."
+        }
         "technical" | "technical_math" => {
-            "Preserve formulas, variables, units, code, and technical terminology exactly."
+            "Preserve formulas, variables, units, code, and technical terminology exactly. Do not expand or simplify technical statements."
+        }
+        "math_science" => {
+            "This is math or science content. Preserve the speaker's exact wording, variables, operators, units, and equation order. Use LaTeX only when the spoken expression is unambiguous; otherwise keep the spoken wording and mark it [unclear] instead of inventing notation."
+        }
+        "technical_code" => {
+            "This is technical or programming content. Preserve identifiers, commands, filenames, acronyms, case-sensitive terms, version numbers, punctuation, and units. Never paraphrase code or commands."
+        }
+        "interview" => {
+            "This is a conversation. Preserve turn-taking, interruptions, false starts, and meaningful filler words. Do not infer a person's identity or role when it is not stated."
+        }
+        "multilingual" => {
+            "The audio may switch languages. Preserve every language in its original script and keep code-switching in place. Do not translate, transliterate, or force all speech into one language."
         }
         "setup_test" => {
             "The audio may be silent; return an empty segments array if no speech exists."
         }
-        _ => "Preserve the spoken language and wording accurately.",
+        _ => {
+            "Preserve the spoken language, wording, false starts, meaningful filler words, and genuine repetition accurately. Add punctuation for readability without paraphrasing."
+        }
     };
+    let language = language_policy(settings);
     let additional = settings.additional_prompt.trim();
     format!(
-        "Transcribe only the attached audio segment as timestamped JSON.\nTitle: {title}\nAbsolute segment range: {start:.3} to {end:.3} seconds.\nLanguage preference: {language}.\n{preset}\n{additional}\nRules: do not summarize; do not invent missing speech; timestamps must be absolute seconds in the original media; preserve genuine repetition; return an empty segments array for silence; stop at the end of this segment.",
+        "Transcribe only the attached audio segment as timestamped JSON.\nTitle: {title}\nAbsolute segment range: {start:.3} to {end:.3} seconds.\nLanguage policy: {language}\nContent profile: {preset}\nAdditional user guidance: {additional}\nRules: produce a faithful transcript, not a summary; detect every spoken language; preserve each language's original wording and script, including code-switching; do not translate or transliterate; do not invent missing speech; do not silently remove uncertainty; timestamps must be absolute seconds in the original media; preserve genuine repetition; use an optional BCP-47 language_code for every segment and a languages summary; return an empty segments array for silence; stop at the end of this segment.",
         start = descriptor.start_seconds,
         end = descriptor.end_seconds,
-        language = settings.language,
     )
+}
+
+fn language_policy(settings: &AppSettings) -> String {
+    let preferences = serde_json::to_value(&settings.language).unwrap_or(Value::Null);
+    let mode = preferences["mode"].as_str().unwrap_or("auto");
+    let hints = preferences["hints"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|hint| !hint.is_empty())
+        .take(5)
+        .collect::<Vec<_>>();
+    let mode_note = match mode {
+        "auto" | "detect" | "" => "Detect every spoken language without assuming one dominant language.",
+        _ => "Detect every spoken language; the selected language mode is a preference, not a restriction.",
+    };
+    if hints.is_empty() {
+        format!("{mode_note} No language hints were supplied.")
+    } else {
+        format!(
+            "{mode_note} Soft language hints: {}. These hints never exclude unexpected languages.",
+            hints.join(", ")
+        )
+    }
 }
 
 fn parse_transcript_response(
@@ -489,7 +649,6 @@ fn parse_transcript_response(
         )
         .retryable("The segment remains cached.")
     })?;
-    let language = parsed["language"].as_str().unwrap_or("unknown").to_string();
     let values = parsed["segments"].as_array().ok_or_else(|| {
         AppError::new(
             "transcript_segments_missing",
@@ -500,6 +659,10 @@ fn parse_transcript_response(
         .retryable("The segment remains cached.")
     })?;
     let mut segments = Vec::new();
+    let mut languages = language_codes_from_summary(&parsed);
+    if let Some(language) = parsed["language"].as_str() {
+        push_language_code(&mut languages, language);
+    }
     for segment in values {
         let mut start = segment["start_seconds"]
             .as_f64()
@@ -531,13 +694,69 @@ fn parse_transcript_response(
             )
             .retryable("Nothing was deleted; the rejected response is not used."));
         }
+        let language_code = normalize_language_code(segment["language_code"].as_str());
+        push_language_code(&mut languages, &language_code);
         segments.push(TranscriptSegment {
             start_seconds: start.max(0.0),
             end_seconds: end,
             text: text.to_string(),
+            language_code: Some(language_code),
         });
     }
-    Ok(SegmentTranscript { language, segments })
+    if languages.is_empty() {
+        languages.push("und".to_string());
+    }
+    Ok(SegmentTranscript {
+        language: languages
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "und".to_string()),
+        languages,
+        segments,
+    })
+}
+
+fn language_codes_from_summary(value: &Value) -> Vec<String> {
+    let mut languages = Vec::new();
+    for entry in value["languages"].as_array().into_iter().flatten() {
+        match entry {
+            Value::String(code) => push_language_code(&mut languages, code),
+            Value::Object(_) => {
+                let code = entry["language_code"]
+                    .as_str()
+                    .or_else(|| entry["code"].as_str())
+                    .or_else(|| entry["language"].as_str());
+                if let Some(code) = code {
+                    push_language_code(&mut languages, code);
+                }
+            }
+            _ => {}
+        }
+    }
+    languages
+}
+
+fn push_language_code(languages: &mut Vec<String>, code: &str) {
+    let code = normalize_language_code(Some(code));
+    if !languages.contains(&code) {
+        languages.push(code);
+    }
+}
+
+fn normalize_language_code(code: Option<&str>) -> String {
+    let code = code.unwrap_or_default().trim();
+    if code.is_empty() {
+        "und".to_string()
+    } else {
+        code.to_ascii_lowercase()
+    }
+}
+
+fn generate_content_url(model: &str) -> String {
+    format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+        normalize_model_id(model)
+    )
 }
 
 fn looks_like_model_loop(text: &str) -> bool {
@@ -682,6 +901,18 @@ impl ProgressReporter for NoopReporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lecturescribe_core::{LanguageMode, LanguagePreferences};
+
+    fn descriptor() -> SegmentDescriptor {
+        SegmentDescriptor {
+            index: 1,
+            path: "segment.wav".to_string(),
+            start_seconds: 10.0,
+            end_seconds: 20.0,
+            checksum: String::new(),
+            size_bytes: 0,
+        }
+    }
 
     #[test]
     fn genuine_short_repetition_is_not_trimmed() {
@@ -691,5 +922,68 @@ mod tests {
     #[test]
     fn abnormal_long_repetition_is_rejected() {
         assert!(looks_like_model_loop(&vec!["loop"; 30].join(" ")));
+    }
+
+    #[test]
+    fn multilingual_prompt_preserves_scripts_and_soft_hints() {
+        let settings = AppSettings {
+            language: LanguagePreferences {
+                mode: LanguageMode::Hints,
+                hints: vec!["ar".to_string(), "en".to_string(), "fr".to_string()],
+            },
+            ..AppSettings::default()
+        };
+        let prompt = build_prompt(&descriptor(), "Mixed lecture", &settings);
+
+        assert!(prompt.contains("detect every spoken language"));
+        assert!(prompt.contains("original wording and script"));
+        assert!(prompt.contains("do not translate or transliterate"));
+        assert!(prompt.contains("Soft language hints: ar, en, fr"));
+        assert!(prompt.contains("never exclude unexpected languages"));
+    }
+
+    #[test]
+    fn legacy_and_empty_language_preferences_keep_detection_enabled() {
+        let legacy = AppSettings {
+            language: LanguagePreferences::from_legacy("ar"),
+            ..AppSettings::default()
+        };
+        let legacy_prompt = build_prompt(&descriptor(), "Lecture", &legacy);
+        let default_prompt = build_prompt(&descriptor(), "Lecture", &AppSettings::default());
+
+        assert!(legacy_prompt.contains("Soft language hints: ar"));
+        assert!(legacy_prompt.contains("never exclude unexpected languages"));
+        assert!(default_prompt.contains("No language hints were supplied"));
+    }
+
+    #[test]
+    fn parser_keeps_text_when_language_codes_are_missing() {
+        let response = json!({
+            "candidates": [{
+                "finishReason": "STOP",
+                "content": { "parts": [{ "text": r#"{
+                    "languages": ["en", {"code": "es"}],
+                    "segments": [
+                        {"start_seconds": 10.0, "end_seconds": 12.0, "text": "hello", "language_code": "en"},
+                        {"start_seconds": 12.0, "text": "hola"}
+                    ]
+                }"# }] }
+            }]
+        });
+
+        let transcript = parse_transcript_response(&response, &descriptor()).unwrap();
+
+        assert_eq!(transcript.segments.len(), 2);
+        assert_eq!(transcript.segments[0].language_code.as_deref(), Some("en"));
+        assert_eq!(transcript.segments[1].language_code.as_deref(), Some("und"));
+        assert_eq!(transcript.languages, vec!["en", "es", "und"]);
+    }
+
+    #[test]
+    fn selected_model_url_has_no_automatic_fallback() {
+        let url = generate_content_url("models/gemini-3.5-flash");
+
+        assert!(url.ends_with("models/gemini-3.5-flash:generateContent"));
+        assert!(!url.contains("gemini-3.1-flash-lite"));
     }
 }

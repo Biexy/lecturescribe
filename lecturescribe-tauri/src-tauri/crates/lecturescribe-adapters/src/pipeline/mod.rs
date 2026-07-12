@@ -7,6 +7,7 @@ use crate::paths::AppPaths;
 use crate::tools::ToolResolver;
 use lecturescribe_core::{
     stable_id, AppError, ArtifactKind, ArtifactRecord, ErrorCategory, TaskKind,
+    TRANSCRIPT_SCHEMA_VERSION,
 };
 use lecturescribe_engine::{
     JobControl, ProgressReporter, Store, TaskContext, TaskExecutionResult, TaskExecutor,
@@ -129,15 +130,20 @@ impl TaskExecutor for PipelineExecutor {
 
 pub(super) fn transcription_config_hash(context: &TaskContext) -> String {
     stable_id(
-        "transcription-cache-v1",
+        "transcription-cache-v2",
         &serde_json::json!({
             "item": context.item.item.canonical_source,
             "model": context.plan.settings.model,
-            "language": context.plan.settings.language,
-            "preset": context.plan.settings.prompt_preset,
-            "additional": context.plan.settings.additional_prompt,
-            "segment_minutes": context.plan.settings.segment_minutes,
-            "overlap_seconds": context.plan.settings.overlap_seconds,
+            "language_preferences": context.plan.settings.language,
+            "prompt": {
+                "profile": context.plan.settings.prompt_preset,
+                "additional": context.plan.settings.additional_prompt,
+            },
+            "segmentation": {
+                "segment_minutes": context.plan.settings.segment_minutes,
+                "overlap_seconds": context.plan.settings.overlap_seconds,
+            },
+            "transcript_schema_version": TRANSCRIPT_SCHEMA_VERSION,
         })
         .to_string(),
     )

@@ -142,7 +142,14 @@ impl Store {
         let connection = self.connect()?;
         let job_id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        connection.transaction(|connection| {
+        let (job_id, created) = connection.transaction(|connection| {
+            let existing = connection.query(
+                "SELECT id FROM jobs WHERE plan_id = ? AND state IN ('planned', 'running', 'paused', 'waiting', 'cancelling', 'interrupted') ORDER BY started_at DESC LIMIT 1",
+                &[plan.id.clone().into()],
+            )?;
+            if let Some(row) = existing.first() {
+                return Ok((row[0].text().unwrap_or_default().to_string(), false));
+            }
             connection.execute(
                 "INSERT INTO jobs(id, plan_id, state, sequence, started_at, message) VALUES(?, ?, ?, 0, ?, ?)",
                 &[
@@ -174,7 +181,7 @@ impl Store {
                         planned.item.id.clone().into(),
                         (planned.ordinal as i64).into(),
                         enum_name(state)?.into(),
-                        optional_enum(outcome)?.into(),
+                        optional_enum(outcome)?,
                         message.into(),
                         SqlValue::Null,
                         to_json(planned)?.into(),
@@ -198,23 +205,85 @@ impl Store {
                     )?;
                 }
             }
-            Ok(())
+            Ok((job_id.clone(), true))
         })?;
-        self.append_event(AppEvent {
-            schema_version: EVENT_SCHEMA_VERSION,
-            sequence: 0,
-            occurred_at: Utc::now(),
-            job_id: job_id.clone(),
-            item_id: None,
-            task_id: None,
-            event_type: EventType::JobState,
-            state: Some("planned".to_string()),
-            progress: None,
-            attempt: None,
-            message: "Run created".to_string(),
-            error: None,
-        })?;
+        if created {
+            self.append_event(AppEvent {
+                schema_version: EVENT_SCHEMA_VERSION,
+                sequence: 0,
+                occurred_at: Utc::now(),
+                job_id: job_id.clone(),
+                item_id: None,
+                task_id: None,
+                event_type: EventType::JobState,
+                state: Some("planned".to_string()),
+                progress: None,
+                attempt: None,
+                message: "Run created".to_string(),
+                error: None,
+            })?;
+        }
         Ok(job_id)
+    }
+
+    pub fn claim_task(&self, transition: TaskTransition) -> Result<Option<AppEvent>, AppError> {
+        if transition.task_state != TaskState::Running {
+            return Err(AppError::new(
+                "task_claim_invalid_state",
+                ErrorCategory::Internal,
+                "LectureScribe could not start this task safely.",
+                "Task claims must transition a runnable task to running.",
+            ));
+        }
+        let connection = self.connect()?;
+        connection.transaction(|connection| {
+            let now = Utc::now();
+            let error_json = optional_json(transition.error.as_ref())?;
+            let claimed = connection.execute(
+                "UPDATE tasks SET state = ?, attempt = ?, progress_json = ?, message = ?, error_json = ?, started_at = COALESCE(started_at, ?) WHERE job_id = ? AND id = ? AND state IN ('pending', 'ready', 'interrupted')",
+                &[
+                    enum_name(TaskState::Running)?.into(),
+                    (transition.attempt as i64).into(),
+                    optional_json(transition.progress.as_ref())?,
+                    transition.message.clone().into(),
+                    error_json.clone(),
+                    now.to_rfc3339().into(),
+                    transition.job_id.clone().into(),
+                    transition.task_id.clone().into(),
+                ],
+            )?;
+            if claimed != 1 {
+                return Ok(None);
+            }
+            connection.execute(
+                "UPDATE job_items SET state = ?, message = ?, error_json = ? WHERE job_id = ? AND item_id = ?",
+                &[
+                    enum_name(transition.item_state)?.into(),
+                    transition.message.clone().into(),
+                    error_json,
+                    transition.job_id.clone().into(),
+                    transition.item_id.clone().into(),
+                ],
+            )?;
+            append_event_on(
+                connection,
+                AppEvent {
+                    schema_version: EVENT_SCHEMA_VERSION,
+                    sequence: 0,
+                    occurred_at: now,
+                    job_id: transition.job_id,
+                    item_id: Some(transition.item_id),
+                    task_id: Some(transition.task_id),
+                    event_type: EventType::Progress,
+                    state: Some(enum_name(TaskState::Running)?),
+                    progress: transition.progress,
+                    attempt: Some(transition.attempt),
+                    message: transition.message,
+                    error: transition.error,
+                },
+            )
+            .map(Some)
+        })
     }
 
     pub fn transition_task(&self, transition: TaskTransition) -> Result<AppEvent, AppError> {
@@ -516,15 +585,27 @@ impl Store {
     pub fn mark_interrupted(&self) -> Result<usize, AppError> {
         let connection = self.connect()?;
         connection.transaction(|connection| {
-            let changed = connection.execute(
-                "UPDATE jobs SET state = 'interrupted', message = 'Run interrupted; verified work is available to resume' WHERE state IN ('running', 'waiting', 'cancelling')",
+            connection.execute(
+                "UPDATE tasks SET state = 'cancelled', message = 'Cancelled by application exit', finished_at = COALESCE(finished_at, ?) WHERE job_id IN (SELECT id FROM jobs WHERE state = 'cancelling') AND state NOT IN ('succeeded', 'reused', 'skipped', 'failed', 'cancelled')",
+                &[Utc::now().to_rfc3339().into()],
+            )?;
+            connection.execute(
+                "UPDATE job_items SET state = 'cancelled', outcome = 'cancelled', message = 'Run cancelled by application exit' WHERE job_id IN (SELECT id FROM jobs WHERE state = 'cancelling') AND outcome IS NULL",
+                &[],
+            )?;
+            let cancelled = connection.execute(
+                "UPDATE jobs SET state = 'cancelled', message = 'Run cancelled by application exit', finished_at = COALESCE(finished_at, ?) WHERE state = 'cancelling'",
+                &[Utc::now().to_rfc3339().into()],
+            )?;
+            let interrupted = connection.execute(
+                "UPDATE jobs SET state = 'interrupted', message = 'Run interrupted; verified work is available to resume' WHERE state IN ('running', 'waiting')",
                 &[],
             )?;
             connection.execute(
-                "UPDATE tasks SET state = 'interrupted', message = 'Interrupted by application exit' WHERE state IN ('running', 'waiting')",
+                "UPDATE tasks SET state = 'interrupted', message = 'Interrupted by application exit' WHERE state IN ('running', 'waiting') AND job_id IN (SELECT id FROM jobs WHERE state = 'interrupted')",
                 &[],
             )?;
-            Ok(changed)
+            Ok(cancelled + interrupted)
         })
     }
 
@@ -657,4 +738,215 @@ fn serialization_error(error: impl std::fmt::Display) -> AppError {
         "LectureScribe could not read its saved job state.",
         error.to_string(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lecturescribe_core::{
+        AppSettings, PlannedAction, PlannedItem, PreviewItem, PreviewSnapshot, ProviderKind,
+        ResourceClass, RunMode, SourceKind, TaskKind, TaskSpec,
+    };
+    use std::collections::HashSet;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    fn test_store() -> Store {
+        Store::open(
+            std::env::temp_dir().join(format!("lecturescribe-store-{}.sqlite3", Uuid::new_v4())),
+        )
+        .unwrap()
+    }
+
+    fn test_plan(store: &Store, item_count: usize) -> RunPlan {
+        let preview_id = Uuid::new_v4().to_string();
+        let items = (0..item_count)
+            .map(|ordinal| {
+                let item_id = format!("item-{ordinal}");
+                let item = PreviewItem {
+                    id: item_id.clone(),
+                    source_id: format!("source-{ordinal}"),
+                    source_kind: SourceKind::LocalMedia,
+                    provider: ProviderKind::Local,
+                    source_group: "test".to_string(),
+                    title: format!("Test item {ordinal}"),
+                    source: format!("C:/test/{ordinal}.wav"),
+                    canonical_source: format!("C:/test/{ordinal}.wav"),
+                    url: None,
+                    media_path: Some(format!("C:/test/{ordinal}.wav")),
+                    existing_media_path: None,
+                    existing_transcript_path: None,
+                    thumbnail_url: None,
+                    duration_seconds: None,
+                    expected_media_name: None,
+                    selected: true,
+                    status: ItemState::Queued,
+                    duplicate_of: None,
+                    error: None,
+                };
+                let task = TaskSpec {
+                    id: format!("task-{ordinal}"),
+                    item_id: item_id.clone(),
+                    kind: TaskKind::Reuse,
+                    resource: ResourceClass::Filesystem,
+                    depends_on: Vec::new(),
+                    idempotency_key: format!("reuse-{ordinal}"),
+                    max_attempts: 1,
+                    weight: 1.0,
+                };
+                PlannedItem {
+                    item,
+                    ordinal: ordinal + 1,
+                    action: PlannedAction::ReuseTranscript,
+                    reason: "test".to_string(),
+                    estimated_segments: 1,
+                    estimated_requests: 0,
+                    tasks: vec![task],
+                    output_stem: format!("Test item {ordinal}"),
+                }
+            })
+            .collect::<Vec<_>>();
+        store
+            .save_preview(&PreviewSnapshot {
+                id: preview_id.clone(),
+                created_at: Utc::now(),
+                items: items.iter().map(|item| item.item.clone()).collect(),
+                duplicate_count: 0,
+                source_count: item_count,
+                warnings: Vec::new(),
+            })
+            .unwrap();
+        RunPlan {
+            id: Uuid::new_v4().to_string(),
+            preview_id,
+            created_at: Utc::now(),
+            mode: RunMode::Transcribe,
+            settings: AppSettings::default(),
+            batch_name: "test-batch".to_string(),
+            batch_output_dir: "C:/test/output/test-batch".to_string(),
+            items,
+            selected_count: item_count,
+            runnable_count: item_count,
+            excluded_count: 0,
+            blocked_count: 0,
+            estimated_requests: 0,
+            blocking_errors: Vec::new(),
+        }
+    }
+
+    fn claim(job_id: &str, item_id: &str, task_id: &str) -> TaskTransition {
+        TaskTransition {
+            job_id: job_id.to_string(),
+            item_id: item_id.to_string(),
+            task_id: task_id.to_string(),
+            task_state: TaskState::Running,
+            item_state: ItemState::Reused,
+            progress: Some(ProgressMetric::indeterminate("step")),
+            attempt: 1,
+            message: "Claimed".to_string(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn concurrent_job_creation_reuses_one_active_job_per_plan() {
+        let store = Arc::new(test_store());
+        let plan = Arc::new(test_plan(&store, 1));
+        let barrier = Arc::new(Barrier::new(8));
+        let jobs = (0..8)
+            .map(|_| {
+                let store = store.clone();
+                let plan = plan.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    store.create_job(&plan).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let job_ids = jobs
+            .into_iter()
+            .map(|job| job.join().unwrap())
+            .collect::<HashSet<_>>();
+
+        assert_eq!(job_ids.len(), 1);
+    }
+
+    #[test]
+    fn concurrent_task_claims_start_exactly_one_task() {
+        let store = Arc::new(test_store());
+        let plan = test_plan(&store, 1);
+        let job_id = store.create_job(&plan).unwrap();
+        let barrier = Arc::new(Barrier::new(8));
+        let claims = (0..8)
+            .map(|_| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                let job_id = job_id.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    store
+                        .claim_task(claim(&job_id, "item-0", "task-0"))
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let claimed = claims
+            .into_iter()
+            .filter_map(|claim| claim.join().unwrap())
+            .count();
+        let snapshot = store.get_job_snapshot(&job_id).unwrap();
+
+        assert_eq!(claimed, 1);
+        assert_eq!(snapshot.items[0].tasks[0].state, TaskState::Running);
+        assert_eq!(snapshot.items[0].tasks[0].attempt, 1);
+    }
+
+    #[test]
+    fn restart_finishes_cancellation_without_losing_reused_work() {
+        let store = test_store();
+        let plan = test_plan(&store, 2);
+        let job_id = store.create_job(&plan).unwrap();
+        let reused = claim(&job_id, "item-0", "task-0");
+        store.claim_task(reused.clone()).unwrap();
+        store
+            .transition_task(TaskTransition {
+                task_state: TaskState::Reused,
+                item_state: ItemState::Reused,
+                progress: Some(ProgressMetric::fraction(1.0, 1.0, "step")),
+                message: "Reused".to_string(),
+                ..reused
+            })
+            .unwrap();
+        store
+            .set_item_outcome(
+                &job_id,
+                "item-0",
+                ItemState::Reused,
+                TerminalOutcome::Reused,
+                "Reused",
+                None,
+            )
+            .unwrap();
+        store
+            .claim_task(claim(&job_id, "item-1", "task-1"))
+            .unwrap();
+        store
+            .set_job_state(
+                &job_id,
+                JobState::Cancelling,
+                "Cancellation requested",
+                None,
+            )
+            .unwrap();
+
+        store.mark_interrupted().unwrap();
+        let snapshot = store.get_job_snapshot(&job_id).unwrap();
+
+        assert_eq!(snapshot.state, JobState::Cancelled);
+        assert_eq!(snapshot.items[0].outcome, Some(TerminalOutcome::Reused));
+        assert_eq!(snapshot.items[0].tasks[0].state, TaskState::Reused);
+        assert_eq!(snapshot.items[1].outcome, Some(TerminalOutcome::Cancelled));
+        assert_eq!(snapshot.items[1].tasks[0].state, TaskState::Cancelled);
+    }
 }

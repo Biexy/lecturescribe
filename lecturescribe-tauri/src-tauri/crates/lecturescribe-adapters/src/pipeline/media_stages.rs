@@ -56,7 +56,7 @@ impl PipelineExecutor {
             )
         })?;
         let output_dir = if context.plan.mode == RunMode::Download {
-            PathBuf::from(&settings.output_dir).join("Media")
+            PathBuf::from(&context.plan.batch_output_dir).join("Media")
         } else {
             self.item_work_dir(context).join("media")
         };

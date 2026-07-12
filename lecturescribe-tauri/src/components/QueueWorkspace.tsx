@@ -1,4 +1,4 @@
-import { useDeferredValue } from "react";
+import { useDeferredValue, useEffect, useId, useRef, useState } from "react";
 import { useVirtualRows } from "../hooks/useVirtualRows";
 import { formatDuration, selectedTranscriptArtifact } from "../lib/backend";
 import {
@@ -115,7 +115,7 @@ function QueueTools({ state, onSearch, onFilter, onSelect, onRefresh }: {
         <Icon name="search" size={16} />
         <span className="sr-only">Search queue</span>
         <input
-          onInput={(event: Event) => onSearch((event.currentTarget as HTMLInputElement).value)}
+          onInput={(event) => onSearch(event.currentTarget.value)}
           placeholder="Search title or source"
           type="search"
           value={state.search}
@@ -261,20 +261,20 @@ function QueueRow({
         aria-label={`Select ${item.title}`}
         checked={selected}
         disabled={blocked || active}
-        onChange={(event: Event) => onToggle(item.id, (event.currentTarget as HTMLInputElement).checked)}
+        onChange={(event) => onToggle(item.id, event.currentTarget.checked)}
         title={blocked ? item.error?.user_message ?? "Duplicate items are not processed twice." : active ? "Selection is locked during a run." : undefined}
         type="checkbox"
       />
       <button className="item-identity" onClick={() => onDetail(item.id)} type="button">
         <Thumbnail item={item} />
         <span>
-          <strong title={item.title}>{item.title}</strong>
+          <strong dir="auto" title={item.title}>{item.title}</strong>
           <small><ProviderIcon provider={item.provider} /> {providerLabel(item.provider)}{item.duration_seconds ? ` - ${formatDuration(item.duration_seconds)}` : ""}</small>
         </span>
       </button>
       <div className="planned-action">
         <span>{snapshot ? actionLabel(snapshot.item.action) : previewActionLabel(item, mode)}</span>
-        <small>{item.expected_media_name ?? item.media_path ?? "Media resolved when the run starts"}</small>
+        <small dir="auto">{item.expected_media_name ?? item.media_path ?? "Media resolved when the run starts"}</small>
       </div>
       <div className="row-status">
         <StatusPill tone={statusTone(status)}>{statusLabel(status, item)}</StatusPill>
@@ -282,21 +282,21 @@ function QueueRow({
           <div className="row-progress"><ProgressBar label={`${item.title} progress`} value={percent} /><span>{percent}%</span></div>
         )}
       </div>
-      <details className="row-menu">
-        <summary aria-label={`Actions for ${item.title}`} title="Item actions"><Icon name="more" size={17} /></summary>
-        <div className="row-menu-popover">
-          <button onClick={() => onDetail(item.id)} type="button"><Icon name="eye" size={15} /> View details</button>
-          <button disabled={!transcriptReady} onClick={() => onOpenArtifact(item.id, transcriptKind)} title={!transcriptReady ? "Available after a transcript is saved." : undefined} type="button"><Icon name="file" size={15} /> Open transcript</button>
-          <button disabled={!mediaReady} onClick={() => onOpenArtifact(item.id, "downloaded_media", true)} title={!mediaReady ? "Available after downloaded media is kept." : undefined} type="button"><Icon name="folder" size={15} /> Reveal media</button>
-        </div>
-      </details>
+      <RowActionsMenu
+        item={item}
+        mediaReady={Boolean(mediaReady)}
+        onDetail={onDetail}
+        onOpenArtifact={onOpenArtifact}
+        transcriptKind={transcriptKind}
+        transcriptReady={Boolean(transcriptReady)}
+      />
     </div>
   );
 }
 
 function Thumbnail({ item }: { item: PreviewItem }) {
   if (item.thumbnail_url) {
-    return <img alt="" loading="lazy" onError={(event: Event) => (event.currentTarget as HTMLImageElement).hidden = true} referrerPolicy="no-referrer" src={item.thumbnail_url} />;
+    return <img alt="" loading="lazy" onError={(event) => { event.currentTarget.hidden = true; }} referrerPolicy="no-referrer" src={item.thumbnail_url} />;
   }
   return <span className="thumbnail-placeholder"><Icon name={item.provider === "local" ? "file-audio" : "video"} size={17} /></span>;
 }
@@ -341,6 +341,106 @@ function previewActionLabel(item: PreviewItem, mode: UiState["mode"]): string {
   if (item.existing_transcript_path) return "Reuse transcript";
   if (item.provider === "local") return "Transcribe local";
   return item.existing_media_path ? "Reuse media + transcribe" : "Download + transcribe";
+}
+
+function RowActionsMenu({
+  item,
+  transcriptKind,
+  transcriptReady,
+  mediaReady,
+  onDetail,
+  onOpenArtifact,
+}: {
+  item: PreviewItem;
+  transcriptKind: ArtifactKind;
+  transcriptReady: boolean;
+  mediaReady: boolean;
+  onDetail: (id: string) => void;
+  onOpenArtifact: (itemId: string, kind: ArtifactKind, reveal?: boolean) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const menuId = useId();
+
+  const focusFirstItem = () => {
+    requestAnimationFrame(() => {
+      rootRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus();
+    });
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    return () => document.removeEventListener("pointerdown", closeOutside);
+  }, [open]);
+
+  const closeAndRun = (action: () => void) => {
+    setOpen(false);
+    action();
+  };
+
+  return (
+    <div className="row-menu" ref={rootRef}>
+      <button
+        aria-controls={menuId}
+        aria-expanded={open}
+        aria-haspopup="menu"
+        aria-label={`Actions for ${item.title}`}
+        className="row-menu-trigger"
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={(event) => {
+          if (event.key !== "ArrowDown") return;
+          event.preventDefault();
+          setOpen(true);
+          focusFirstItem();
+        }}
+        ref={triggerRef}
+        title="Item actions"
+        type="button"
+      >
+        <Icon name="more" size={17} />
+      </button>
+      {open && (
+        <div
+          aria-label={`Actions for ${item.title}`}
+          className="row-menu-popover"
+          id={menuId}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              setOpen(false);
+              triggerRef.current?.focus();
+              return;
+            }
+            if (event.key === "Tab") {
+              setOpen(false);
+              return;
+            }
+            if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+            event.preventDefault();
+            const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'));
+            if (!items.length) return;
+            const current = items.indexOf(document.activeElement as HTMLButtonElement);
+            const next = event.key === "Home"
+              ? 0
+              : event.key === "End"
+                ? items.length - 1
+                : (Math.max(0, current) + (event.key === "ArrowUp" ? -1 : 1) + items.length) % items.length;
+            items[next].focus();
+          }}
+          role="menu"
+        >
+          <button onClick={() => closeAndRun(() => onDetail(item.id))} role="menuitem" type="button"><Icon name="eye" size={15} /> View details</button>
+          <button disabled={!transcriptReady} onClick={() => closeAndRun(() => onOpenArtifact(item.id, transcriptKind))} role="menuitem" type="button"><Icon name="file" size={15} /> {transcriptReady ? "Open transcript" : "Transcript not ready"}</button>
+          <button disabled={!mediaReady} onClick={() => closeAndRun(() => onOpenArtifact(item.id, "downloaded_media", true))} role="menuitem" type="button"><Icon name="folder" size={15} /> {mediaReady ? "Reveal media" : "Media not kept"}</button>
+        </div>
+      )}
+    </div>
+  );
 }
 function statusTone(status: ItemState): "neutral" | "info" | "success" | "warning" | "danger" {
   if (["complete", "reused"].includes(status)) return "success";

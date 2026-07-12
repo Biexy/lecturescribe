@@ -51,7 +51,6 @@ export interface UiState {
   dialog: DialogName;
   detailItemId: string | null;
   activityExpanded: boolean;
-  setupStep: number;
   toasts: ToastMessage[];
 }
 
@@ -76,7 +75,6 @@ export const initialState: UiState = {
   dialog: null,
   detailItemId: null,
   activityExpanded: false,
-  setupStep: 0,
   toasts: [],
 };
 
@@ -106,7 +104,6 @@ export type Action =
   | { type: "dialog"; dialog: DialogName }
   | { type: "detail"; id: string | null }
   | { type: "activity"; expanded: boolean }
-  | { type: "setup_step"; step: number }
   | { type: "toast"; toast: ToastMessage }
   | { type: "dismiss_toast"; id: string };
 
@@ -120,7 +117,7 @@ export function reducer(state: UiState, action: Action): UiState {
         environment: action.environment,
         sources: dedupeSources(action.sources),
         job: action.unfinished,
-        dialog: action.environment.setup_complete ? null : "setup",
+        dialog: null,
       };
     case "boot_failed":
       return { ...state, booting: false, previewError: action.error };
@@ -196,7 +193,7 @@ export function reducer(state: UiState, action: Action): UiState {
     case "mode":
       return { ...state, mode: action.mode, plan: null };
     case "plan_loading":
-      return { ...state, planLoading: true, plan: null };
+      return { ...state, planLoading: true };
     case "plan_ready":
       return { ...state, planLoading: false, plan: action.plan, dialog: "preflight" };
     case "plan_clear":
@@ -217,8 +214,6 @@ export function reducer(state: UiState, action: Action): UiState {
       return { ...state, detailItemId: action.id };
     case "activity":
       return { ...state, activityExpanded: action.expanded };
-    case "setup_step":
-      return { ...state, setupStep: Math.max(0, Math.min(5, action.step)) };
     case "toast":
       return { ...state, toasts: [...state.toasts.slice(-3), action.toast] };
     case "dismiss_toast":

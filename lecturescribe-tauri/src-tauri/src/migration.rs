@@ -1,5 +1,7 @@
 use lecturescribe_adapters::AppPaths;
-use lecturescribe_core::{AppError, AppSettings, Theme, TranscriptFormat};
+use lecturescribe_core::{
+    AppError, AppSettings, LanguagePreferences, OutputPackage, Theme, TranscriptFormat,
+};
 use lecturescribe_engine::Store;
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -29,6 +31,7 @@ struct LegacySettings {
     work_dir: String,
     model: String,
     theme: String,
+    language: String,
     transcript_format: String,
     prompt_preset: String,
     ffmpeg_path: String,
@@ -52,6 +55,9 @@ fn apply_legacy(settings: &mut AppSettings, legacy: LegacySettings) {
     copy_nonempty(&mut settings.download_dir, legacy.download_dir);
     copy_nonempty(&mut settings.work_dir, legacy.work_dir);
     copy_nonempty(&mut settings.model, legacy.model);
+    if !legacy.language.trim().is_empty() {
+        settings.language = LanguagePreferences::from_legacy(legacy.language);
+    }
     copy_nonempty(&mut settings.prompt_preset, legacy.prompt_preset);
     copy_nonempty(&mut settings.ffmpeg_path, legacy.ffmpeg_path);
     copy_nonempty(&mut settings.ffprobe_path, legacy.ffprobe_path);
@@ -66,10 +72,28 @@ fn apply_legacy(settings: &mut AppSettings, legacy: LegacySettings) {
     } else {
         Theme::Light
     };
-    settings.output_formats = match legacy.transcript_format.as_str() {
-        "txt" => vec![TranscriptFormat::Text],
-        "markdown" => vec![TranscriptFormat::Markdown],
-        _ => vec![TranscriptFormat::Text, TranscriptFormat::Markdown],
+    (settings.output_package, settings.output_formats) = match legacy.transcript_format.as_str() {
+        "txt" => (OutputPackage::Custom, vec![TranscriptFormat::Text]),
+        "markdown" => (OutputPackage::Custom, vec![TranscriptFormat::Markdown]),
+        "srt" => (OutputPackage::Custom, vec![TranscriptFormat::Srt]),
+        "vtt" => (OutputPackage::Custom, vec![TranscriptFormat::Vtt]),
+        "subtitles" => (
+            OutputPackage::Subtitles,
+            vec![TranscriptFormat::Srt, TranscriptFormat::Vtt],
+        ),
+        "complete" => (
+            OutputPackage::Complete,
+            vec![
+                TranscriptFormat::Text,
+                TranscriptFormat::Markdown,
+                TranscriptFormat::Srt,
+                TranscriptFormat::Vtt,
+            ],
+        ),
+        _ => (
+            OutputPackage::Readable,
+            vec![TranscriptFormat::Text, TranscriptFormat::Markdown],
+        ),
     };
     if (5..=30).contains(&legacy.chunk_minutes) {
         settings.segment_minutes = legacy.chunk_minutes;

@@ -41,6 +41,7 @@ pub struct JobRunner {
     executor: Arc<dyn TaskExecutor>,
     sink: Arc<dyn EventSink>,
     limits: ResourceLimits,
+    active_runners: Arc<Mutex<HashMap<String, Arc<JobControl>>>>,
 }
 
 impl JobRunner {
@@ -54,6 +55,7 @@ impl JobRunner {
             executor,
             sink,
             limits: ResourceLimits::default(),
+            active_runners: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -64,16 +66,34 @@ impl JobRunner {
 
     pub fn start(&self, plan: RunPlan) -> Result<(String, Arc<JobControl>), AppError> {
         let job_id = self.store.create_job(&plan)?;
-        let control = Arc::new(JobControl::default());
-        self.spawn(job_id.clone(), control.clone());
+        let control = self.launch(job_id.clone());
         Ok((job_id, control))
     }
 
     pub fn resume(&self, job_id: String) -> Result<Arc<JobControl>, AppError> {
         self.store.get_job_snapshot(&job_id)?;
-        let control = Arc::new(JobControl::default());
-        self.spawn(job_id, control.clone());
-        Ok(control)
+        Ok(self.launch(job_id))
+    }
+
+    fn launch(&self, job_id: String) -> Arc<JobControl> {
+        let (control, acquired) = {
+            let mut active = self
+                .active_runners
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match active.get(&job_id) {
+                Some(control) => (control.clone(), false),
+                None => {
+                    let control = Arc::new(JobControl::default());
+                    active.insert(job_id.clone(), control.clone());
+                    (control, true)
+                }
+            }
+        };
+        if acquired {
+            self.spawn(job_id, control.clone());
+        }
+        control
     }
 
     fn spawn(&self, job_id: String, control: Arc<JobControl>) {
@@ -89,10 +109,24 @@ impl JobRunner {
                     runner.sink.emit(event);
                 }
             }
+            runner.release_runner(&job_id);
         });
     }
 
+    fn release_runner(&self, job_id: &str) {
+        if let Ok(mut active) = self.active_runners.lock() {
+            active.remove(job_id);
+        }
+    }
+
     fn run(&self, job_id: &str, control: Arc<JobControl>) -> Result<(), AppError> {
+        if control.cancelled() || self.store.get_job_snapshot(job_id)?.state == JobState::Cancelling
+        {
+            control.cancel();
+            let snapshot = self.store.get_job_snapshot(job_id)?;
+            self.cancel_remaining(job_id, &snapshot)?;
+            return self.finish(job_id, self.store.get_job_snapshot(job_id)?, true);
+        }
         self.emit_job_state(job_id, JobState::Running, "Run started", None)?;
         let plan = self
             .store
@@ -160,7 +194,7 @@ impl JobRunner {
 
                     let attempt = task.attempt + 1;
                     let item_state = item_state_for(task.kind);
-                    let event = self.store.transition_task(TaskTransition {
+                    let Some(event) = self.store.claim_task(TaskTransition {
                         job_id: job_id.to_string(),
                         item_id: item_snapshot.item.item.id.clone(),
                         task_id: task.id.clone(),
@@ -170,7 +204,10 @@ impl JobRunner {
                         attempt,
                         message: task_start_message(task.kind, &item_snapshot.item.item.title),
                         error: None,
-                    })?;
+                    })?
+                    else {
+                        continue;
+                    };
                     self.sink.emit(event);
                     pool.acquire(task.resource);
                     running.insert(task.id.clone(), task.resource);
@@ -566,11 +603,17 @@ impl JobRunner {
             })
             .filter_map(|item| item.item.item.duration_seconds)
             .sum();
+        let plan = self.store.get_plan(&snapshot.plan_id)?;
+        let output_dir = if plan.batch_output_dir.trim().is_empty() {
+            plan.settings.output_dir
+        } else {
+            plan.batch_output_dir
+        };
         let summary = RunSummary {
             job_id: job_id.to_string(),
             outcome: state,
             counts: snapshot.counts,
-            output_dir: self.store.get_plan(&snapshot.plan_id)?.settings.output_dir,
+            output_dir,
             downloaded_media,
             saved_transcripts,
             gemini_requests,
@@ -745,4 +788,151 @@ fn retry_delay(attempt: u32, category: ErrorCategory) -> Duration {
         _ => 2,
     };
     Duration::from_secs((base * 2u64.saturating_pow(attempt.saturating_sub(1))).min(180))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::NoopEventSink;
+    use lecturescribe_core::{build_plan, PlanCapabilities};
+    use lecturescribe_core::{
+        AppSettings, ItemState, PlanRequest, PreviewItem, PreviewSnapshot, ProviderKind, RunMode,
+        SourceKind,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Barrier, Condvar};
+
+    struct BlockingExecutor {
+        calls: AtomicUsize,
+        state: (Mutex<(bool, bool)>, Condvar),
+    }
+
+    impl BlockingExecutor {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                state: (Mutex::new((false, false)), Condvar::new()),
+            }
+        }
+
+        fn wait_until_started(&self) {
+            let (lock, changed) = &self.state;
+            let started = lock.lock().unwrap();
+            let (started, _) = changed
+                .wait_timeout_while(started, Duration::from_secs(2), |state| !state.0)
+                .unwrap();
+            assert!(started.0, "runner did not start the task");
+        }
+
+        fn release(&self) {
+            let (lock, changed) = &self.state;
+            let mut state = lock.lock().unwrap();
+            state.1 = true;
+            changed.notify_all();
+        }
+    }
+
+    impl TaskExecutor for BlockingExecutor {
+        fn execute(
+            &self,
+            _context: &TaskContext,
+            _reporter: &dyn ProgressReporter,
+            _control: &JobControl,
+        ) -> Result<TaskExecutionResult, AppError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let (lock, changed) = &self.state;
+            let mut state = lock.lock().unwrap();
+            state.0 = true;
+            changed.notify_all();
+            let _ = changed
+                .wait_timeout_while(state, Duration::from_secs(2), |state| !state.1)
+                .unwrap();
+            Ok(TaskExecutionResult::default())
+        }
+    }
+
+    fn test_plan(store: &Store) -> RunPlan {
+        let preview = PreviewSnapshot {
+            id: "runner-preview".to_string(),
+            created_at: Utc::now(),
+            items: vec![PreviewItem {
+                id: "runner-item".to_string(),
+                source_id: "runner-source".to_string(),
+                source_kind: SourceKind::LocalMedia,
+                provider: ProviderKind::Local,
+                source_group: "test".to_string(),
+                title: "Runner test".to_string(),
+                source: "C:/test/input.wav".to_string(),
+                canonical_source: "C:/test/input.wav".to_string(),
+                url: None,
+                media_path: Some("C:/test/input.wav".to_string()),
+                existing_media_path: None,
+                existing_transcript_path: Some("C:/test/output.txt".to_string()),
+                thumbnail_url: None,
+                duration_seconds: None,
+                expected_media_name: None,
+                selected: true,
+                status: ItemState::Queued,
+                duplicate_of: None,
+                error: None,
+            }],
+            duplicate_count: 0,
+            source_count: 1,
+            warnings: Vec::new(),
+        };
+        store.save_preview(&preview).unwrap();
+        build_plan(
+            &preview,
+            PlanRequest {
+                preview_id: preview.id.clone(),
+                selected_item_ids: vec!["runner-item".to_string()],
+                mode: RunMode::Transcribe,
+                settings: AppSettings::default(),
+                overrides: Default::default(),
+            },
+            PlanCapabilities {
+                output_ready: true,
+                ..PlanCapabilities::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn concurrent_resumes_acquire_one_runner_and_execute_once() {
+        let store = Arc::new(
+            Store::open(std::env::temp_dir().join(format!(
+                "lecturescribe-runner-{}.sqlite3",
+                uuid::Uuid::new_v4()
+            )))
+            .unwrap(),
+        );
+        let executor = Arc::new(BlockingExecutor::new());
+        let runner = JobRunner::new(store.clone(), executor.clone(), Arc::new(NoopEventSink));
+        let job_id = store.create_job(&test_plan(&store)).unwrap();
+        let barrier = Arc::new(Barrier::new(6));
+        let resumes = (0..6)
+            .map(|_| {
+                let runner = runner.clone();
+                let job_id = job_id.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    runner.resume(job_id).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let controls = resumes
+            .into_iter()
+            .map(|resume| resume.join().unwrap())
+            .collect::<Vec<_>>();
+
+        executor.wait_until_started();
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+        assert!(controls
+            .iter()
+            .all(|control| Arc::ptr_eq(control, &controls[0])));
+
+        executor.release();
+    }
 }

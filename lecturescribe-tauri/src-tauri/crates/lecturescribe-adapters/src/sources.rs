@@ -278,18 +278,20 @@ impl SourceInspector {
         if let Some(artifact) = self
             .store
             .latest_artifact(&item.id, ArtifactKind::DownloadedMedia)?
-            .filter(|artifact| artifact_valid_at_preview(artifact))
+            .filter(artifact_valid_at_preview)
         {
             item.existing_media_path = Some(artifact.path);
         }
         for kind in [
             ArtifactKind::TextTranscript,
             ArtifactKind::MarkdownTranscript,
+            ArtifactKind::SrtTranscript,
+            ArtifactKind::VttTranscript,
         ] {
             if let Some(artifact) = self
                 .store
                 .latest_artifact(&item.id, kind)?
-                .filter(|artifact| artifact_valid_at_preview(artifact))
+                .filter(artifact_valid_at_preview)
             {
                 item.existing_transcript_path = Some(artifact.path);
                 break;
@@ -536,10 +538,73 @@ fn is_media_file(path: &Path) -> bool {
 mod tests {
     use super::*;
 
+    fn test_paths(root: &Path) -> crate::paths::AppPaths {
+        let data_dir = root.join("data");
+        crate::paths::AppPaths {
+            tools_dir: data_dir.join("tools"),
+            cache_dir: data_dir.join("cache"),
+            logs_dir: data_dir.join("logs"),
+            database_path: data_dir.join("lecturescribe.sqlite3"),
+            data_dir,
+            install_dir: root.join("app"),
+        }
+    }
+
     #[test]
     fn media_extensions_are_case_insensitive() {
         assert!(is_media_file(Path::new("Lecture.MP4")));
         assert!(is_media_file(Path::new("audio.opus")));
         assert!(!is_media_file(Path::new("notes.txt")));
+    }
+
+    #[test]
+    fn local_media_directory_previews_mp3_and_mp4_as_ready_items() {
+        let root = std::env::temp_dir().join(format!(
+            "lecturescribe-local-preview-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let media_dir = root.join("media");
+        fs::create_dir_all(&media_dir).expect("create media fixture directory");
+        fs::write(media_dir.join("Interview.mp3"), b"fixture").expect("create mp3 fixture");
+        fs::write(media_dir.join("Workshop.MP4"), b"fixture").expect("create mp4 fixture");
+        fs::write(media_dir.join("notes.txt"), b"ignored").expect("create ignored fixture");
+
+        let paths = test_paths(&root);
+        let store = Arc::new(Store::open(paths.database_path.clone()).expect("open test store"));
+        let inspector = SourceInspector::new(store, ToolResolver::new(paths));
+        let preview = inspector
+            .inspect(
+                InspectSourcesRequest {
+                    sources: vec![SourceInput {
+                        id: "local-folder".to_string(),
+                        kind: SourceKind::Directory,
+                        value: media_dir.to_string_lossy().to_string(),
+                        label: "Local media".to_string(),
+                        automatic: false,
+                    }],
+                    confirm_large_playlists: false,
+                    playlist_limit: 200,
+                },
+                &AppSettings::default(),
+            )
+            .expect("preview local media");
+
+        assert_eq!(preview.items.len(), 2);
+        assert_eq!(preview.duplicate_count, 0);
+        assert!(preview.items.iter().all(|item| {
+            item.provider == ProviderKind::Local
+                && item.status == ItemState::Ready
+                && item.selected
+                && item.media_path.is_some()
+        }));
+        let mut titles = preview
+            .items
+            .iter()
+            .map(|item| item.title.as_str())
+            .collect::<Vec<_>>();
+        titles.sort_unstable();
+        assert_eq!(titles, vec!["Interview", "Workshop"]);
+
+        fs::remove_dir_all(root).expect("remove local media fixture");
     }
 }

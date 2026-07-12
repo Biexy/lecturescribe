@@ -41,9 +41,9 @@ pub struct AppError {
     pub category: ErrorCategory,
     pub severity: ErrorSeverity,
     pub user_message: String,
-    pub technical_detail: String,
+    pub technical_detail: Box<str>,
     pub retryable: bool,
-    pub preserved_work: String,
+    pub preserved_work: Box<str>,
     pub recovery_actions: Vec<RecoveryAction>,
 }
 
@@ -59,16 +59,16 @@ impl AppError {
             category,
             severity: ErrorSeverity::Error,
             user_message: user_message.into(),
-            technical_detail: technical_detail.into(),
+            technical_detail: technical_detail.into().into_boxed_str(),
             retryable: false,
-            preserved_work: String::new(),
+            preserved_work: Box::default(),
             recovery_actions: Vec::new(),
         }
     }
 
     pub fn retryable(mut self, preserved_work: impl Into<String>) -> Self {
         self.retryable = true;
-        self.preserved_work = preserved_work.into();
+        self.preserved_work = preserved_work.into().into_boxed_str();
         self
     }
 
@@ -193,6 +193,19 @@ impl ToolStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityStatus {
+    pub ready: bool,
+    pub blockers: Vec<AppError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetupCapabilities {
+    pub download_links: CapabilityStatus,
+    pub transcribe_local: CapabilityStatus,
+    pub transcribe_links: CapabilityStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvironmentSnapshot {
     pub api_key_configured: bool,
     pub api_key_verified: bool,
@@ -204,7 +217,11 @@ pub struct EnvironmentSnapshot {
     pub database_ok: bool,
     pub network_online: Option<bool>,
     pub app_version: String,
+    pub capabilities: SetupCapabilities,
+    /// Legacy aggregate readiness retained until frontend capability integration is complete.
+    /// Use `capabilities` as the semantic source of readiness.
     pub setup_complete: bool,
+    /// Legacy aggregate diagnostics retained for compatibility.
     pub problems: Vec<AppError>,
 }
 
@@ -214,4 +231,39 @@ pub struct SetupTestResult {
     pub message: String,
     pub model: String,
     pub transcript_preview: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelAvailability {
+    Available,
+    Unavailable,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelValidationStatus {
+    Valid,
+    Invalid,
+    Unverified,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelOption {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+    pub recommended: bool,
+    pub quality_label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelValidation {
+    pub model_id: String,
+    pub availability: ModelAvailability,
+    pub status: ModelValidationStatus,
+    pub message: String,
+    #[serde(default)]
+    pub checked_at: Option<DateTime<Utc>>,
 }

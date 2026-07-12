@@ -15,12 +15,21 @@ pub enum PlannedAction {
     Blocked,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RunOverrides {
+    pub batch_name: Option<String>,
+    pub model_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanRequest {
     pub preview_id: String,
     pub selected_item_ids: Vec<String>,
     pub mode: RunMode,
     pub settings: AppSettings,
+    #[serde(default)]
+    pub overrides: RunOverrides,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +41,8 @@ pub struct PlannedItem {
     pub estimated_segments: usize,
     pub estimated_requests: usize,
     pub tasks: Vec<TaskSpec>,
+    #[serde(default)]
+    pub output_stem: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +52,10 @@ pub struct RunPlan {
     pub created_at: DateTime<Utc>,
     pub mode: RunMode,
     pub settings: AppSettings,
+    #[serde(default)]
+    pub batch_name: String,
+    #[serde(default)]
+    pub batch_output_dir: String,
     pub items: Vec<PlannedItem>,
     pub selected_count: usize,
     pub runnable_count: usize,

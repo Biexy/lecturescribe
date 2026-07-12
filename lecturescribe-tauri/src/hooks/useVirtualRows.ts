@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState, type UIEvent } from "react";
 
 export interface VirtualRow {
   index: number;
@@ -39,8 +39,8 @@ export function useVirtualRows(count: number, rowHeight = 48, overscan = 6) {
     scrollRef,
     rows,
     totalHeight: count * rowHeight,
-    onScroll(event: Event) {
-      setScrollTop((event.currentTarget as HTMLDivElement).scrollTop);
+    onScroll(event: UIEvent<HTMLDivElement>) {
+      setScrollTop(event.currentTarget.scrollTop);
     },
   };
 }

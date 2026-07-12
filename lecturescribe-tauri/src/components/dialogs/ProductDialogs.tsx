@@ -85,7 +85,7 @@ export function SummaryModal({
         <SummaryValue label="Cancelled" value={summary.counts.cancelled} />
         <SummaryValue label="Transcripts" value={summary.saved_transcripts} />
         <SummaryValue label="Downloads" value={summary.downloaded_media} />
-        <SummaryValue label="Gemini requests" value={summary.gemini_requests} />
+        <SummaryValue label="Transcribed segments" value={summary.gemini_requests} />
         <SummaryValue label="Elapsed" value={formatElapsed(summary.elapsed_seconds)} />
       </div>
       <div className="path-display"><Icon name="folder" size={16} /><span title={summary.output_dir}>{summary.output_dir}</span></div>

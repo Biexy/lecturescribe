@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tauri dev",
     "build": "npm run bundle:downloader && tauri build",
+    "build:portable": "powershell -ExecutionPolicy Bypass -File ..\\scripts\\package-portable.ps1",
     "bundle:downloader": "powershell -ExecutionPolicy Bypass -File ..\\scripts\\fetch-yt-dlp.ps1",
     "dev:frontend": "vite --host 127.0.0.1 --port 1420",
     "build:frontend": "tsc && node_modules\\@esbuild\\win32-x64\\esbuild.exe src\\main.tsx --bundle --format=esm --platform=browser --target=es2022 --outdir=dist --minify && copy /Y index.production.html dist\\index.html > nul",
@@ -17,12 +18,14 @@
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.0.0",
-    "react": "file:vendor/react",
-    "react-reconciler": "file:vendor/react-reconciler",
-    "scheduler": "file:vendor/scheduler"
+    "lucide-react": "^0.468.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
     "typescript": "^5.8.0",
     "vite": "^7.0.0"
   }

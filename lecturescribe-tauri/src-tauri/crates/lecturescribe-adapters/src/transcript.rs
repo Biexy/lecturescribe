@@ -6,6 +6,7 @@ use lecturescribe_core::{
     TranscriptSegment, TRANSCRIPT_SCHEMA_VERSION,
 };
 use lecturescribe_engine::JobControl;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -24,12 +25,16 @@ pub fn merge_transcripts(
     model: &str,
     transcripts: Vec<SegmentTranscript>,
 ) -> Result<TranscriptDocument, AppError> {
-    let language = transcripts
+    let mut languages = transcripts
         .iter()
-        .map(|value| value.language.as_str())
-        .find(|value| !value.is_empty() && *value != "unknown")
-        .unwrap_or("unknown")
-        .to_string();
+        .flat_map(|value| {
+            value
+                .languages
+                .iter()
+                .chain(std::iter::once(&value.language))
+        })
+        .filter_map(|language| normalized_language(language))
+        .collect::<BTreeSet<_>>();
     let mut incoming = transcripts
         .into_iter()
         .flat_map(|value| value.segments)
@@ -44,6 +49,13 @@ pub fn merge_transcripts(
         segment.text = segment.text.trim().to_string();
         if segment.text.is_empty() {
             continue;
+        }
+        if let Some(language) = segment
+            .language_code
+            .as_deref()
+            .and_then(normalized_language)
+        {
+            languages.insert(language);
         }
         if let Some(previous) = segments.last() {
             let overlap = boundary_overlap_words(&previous.text, &segment.text);
@@ -84,25 +96,71 @@ pub fn merge_transcripts(
         item_id: item_id.to_string(),
         title: title.to_string(),
         source: source.to_string(),
-        language,
+        language: languages
+            .iter()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string()),
+        languages: languages.into_iter().collect(),
         model: model.to_string(),
         generated_at: chrono::Utc::now(),
         segments,
     })
 }
 
+fn normalized_language(language: &str) -> Option<String> {
+    let language = language.trim();
+    (!language.is_empty() && !language.eq_ignore_ascii_case("unknown"))
+        .then(|| language.to_ascii_lowercase())
+}
+
+fn safe_output_stem(output_stem: &str, item_id: &str) -> String {
+    let stem = output_stem.trim();
+    if stem.is_empty()
+        || stem.contains(":\\")
+        || stem.contains(":/")
+        || stem.starts_with("\\\\")
+        || stem.starts_with('/')
+        || stem.contains("://")
+    {
+        return format!("Transcript [{}]", safe_component(item_id));
+    }
+    let stem = stem
+        .chars()
+        .map(|character| {
+            if character.is_control()
+                || matches!(
+                    character,
+                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+                )
+            {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let stem = stem
+        .trim_matches([' ', '.'])
+        .chars()
+        .take(100)
+        .collect::<String>();
+    if stem.is_empty() {
+        format!("Transcript [{}]", safe_component(item_id))
+    } else {
+        stem
+    }
+}
+
 pub fn write_outputs(
     document: &TranscriptDocument,
     output_dir: &Path,
+    output_stem: &str,
     settings: &AppSettings,
     control: &JobControl,
 ) -> Result<Vec<WrittenOutput>, AppError> {
     fs::create_dir_all(output_dir).map_err(filesystem_error)?;
-    let base = format!(
-        "{} [{}]",
-        safe_component(&document.title),
-        safe_component(&document.item_id)
-    );
+    let base = safe_output_stem(output_stem, &document.item_id);
     let mut outputs = Vec::new();
     for format in &settings.output_formats {
         let (kind, extension, content) = match format {
@@ -136,14 +194,15 @@ pub fn canonical_path(cache_dir: &Path) -> PathBuf {
 fn render_text(document: &TranscriptDocument) -> String {
     let mut lines = vec![
         document.title.clone(),
-        format!("Source: {}", document.source),
-        format!("Language: {}", document.language),
+        format!("Detected languages: {}", language_summary(document)),
         String::new(),
     ];
     for segment in &document.segments {
-        lines.push(format!("[{}]", timestamp(segment.start_seconds, false)));
-        lines.push(segment.text.clone());
-        lines.push(String::new());
+        lines.push(format!(
+            "[{}] {}",
+            compact_timestamp(segment.start_seconds),
+            segment.text
+        ));
     }
     format!("{}\n", lines.join("\n").trim())
 }
@@ -152,18 +211,45 @@ fn render_markdown(document: &TranscriptDocument) -> String {
     let mut lines = vec![
         format!("# {}", document.title),
         String::new(),
-        format!("- Source: {}", document.source),
-        format!("- Language: {}", document.language),
-        format!("- Model: `{}`", document.model),
+        format!("Detected languages: {}", language_summary(document)),
         String::new(),
     ];
     for segment in &document.segments {
-        lines.push(format!("**[{}]**", timestamp(segment.start_seconds, false)));
-        lines.push(String::new());
-        lines.push(segment.text.clone());
-        lines.push(String::new());
+        lines.push(format!(
+            "**[{}]** {}",
+            compact_timestamp(segment.start_seconds),
+            segment.text
+        ));
     }
     format!("{}\n", lines.join("\n").trim())
+}
+
+fn language_summary(document: &TranscriptDocument) -> String {
+    let mut languages = document
+        .languages
+        .iter()
+        .filter(|language| !language.trim().is_empty() && language.as_str() != "unknown")
+        .cloned()
+        .collect::<Vec<_>>();
+    languages.sort();
+    languages.dedup();
+    if languages.is_empty() {
+        "Unknown".to_string()
+    } else {
+        languages.join(", ")
+    }
+}
+
+fn compact_timestamp(seconds: f64) -> String {
+    let whole_seconds = seconds.max(0.0).floor() as u64;
+    let hours = whole_seconds / 3_600;
+    let minutes = whole_seconds % 3_600 / 60;
+    let secs = whole_seconds % 60;
+    if hours > 0 {
+        format!("{hours:02}:{minutes:02}:{secs:02}")
+    } else {
+        format!("{minutes:02}:{secs:02}")
+    }
 }
 
 fn render_srt(document: &TranscriptDocument) -> String {
@@ -291,6 +377,31 @@ fn filesystem_error(error: impl std::fmt::Display) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lecturescribe_core::OutputPackage;
+
+    fn document() -> TranscriptDocument {
+        TranscriptDocument {
+            schema_version: TRANSCRIPT_SCHEMA_VERSION,
+            item_id: "item-1".to_string(),
+            title: "Network Security Lecture".to_string(),
+            source: "https://drive.google.com/file/d/private-token/C:\\Users\\Alice\\private.mp4"
+                .to_string(),
+            language: "en".to_string(),
+            languages: vec!["en".to_string(), "es".to_string()],
+            model: "gemini-private-model".to_string(),
+            generated_at: chrono::Utc::now(),
+            segments: vec![TranscriptSegment {
+                start_seconds: 65.2,
+                end_seconds: Some(68.0),
+                text: "Welcome to the course.".to_string(),
+                language_code: Some("en".to_string()),
+            }],
+        }
+    }
+
+    fn temporary_output_dir() -> PathBuf {
+        std::env::temp_dir().join(format!("lecturescribe-output-{}", uuid::Uuid::new_v4()))
+    }
 
     #[test]
     fn removes_only_exact_boundary_overlap() {
@@ -309,5 +420,72 @@ mod tests {
     #[test]
     fn unrelated_repetition_is_preserved() {
         assert_eq!(boundary_overlap_words("yes yes yes", "yes yes yes"), 0);
+    }
+
+    #[test]
+    fn user_transcripts_use_the_frozen_stem_and_exclude_private_metadata() {
+        let output_dir = temporary_output_dir();
+        let settings = AppSettings {
+            output_package: OutputPackage::Readable,
+            ..AppSettings::default()
+        };
+        let outputs = write_outputs(
+            &document(),
+            &output_dir,
+            "Frozen lecture [item-1]",
+            &settings.sanitized(),
+            &JobControl::default(),
+        )
+        .unwrap();
+
+        assert_eq!(outputs.len(), 2);
+        let text = fs::read_to_string(output_dir.join("Frozen lecture [item-1].txt")).unwrap();
+        let markdown = fs::read_to_string(output_dir.join("Frozen lecture [item-1].md")).unwrap();
+        for content in [&text, &markdown] {
+            assert!(content.contains("Network Security Lecture"));
+            assert!(content.contains("Detected languages: en, es"));
+            assert!(!content.contains("drive.google.com"));
+            assert!(!content.contains("C:\\Users"));
+            assert!(!content.contains("gemini-private-model"));
+        }
+        assert!(text.contains("[01:05] Welcome to the course."));
+        assert!(markdown.contains("**[01:05]** Welcome to the course."));
+        let _ = fs::remove_dir_all(output_dir);
+    }
+
+    #[test]
+    fn each_output_package_writes_its_expected_artifacts() {
+        let cases = [
+            (OutputPackage::Readable, vec!["txt", "md"]),
+            (OutputPackage::Subtitles, vec!["srt", "vtt"]),
+            (OutputPackage::Complete, vec!["txt", "md", "srt", "vtt"]),
+            (OutputPackage::Custom, vec!["md"]),
+        ];
+        for (package, expected_extensions) in cases {
+            let output_dir = temporary_output_dir();
+            let settings = AppSettings {
+                output_package: package,
+                output_formats: if package == OutputPackage::Custom {
+                    vec![TranscriptFormat::Markdown]
+                } else {
+                    AppSettings::default().output_formats
+                },
+                ..AppSettings::default()
+            };
+            let outputs = write_outputs(
+                &document(),
+                &output_dir,
+                "Lecture",
+                &settings.sanitized(),
+                &JobControl::default(),
+            )
+            .unwrap();
+
+            assert_eq!(outputs.len(), expected_extensions.len());
+            for extension in expected_extensions {
+                assert!(output_dir.join(format!("Lecture.{extension}")).is_file());
+            }
+            let _ = fs::remove_dir_all(output_dir);
+        }
     }
 }

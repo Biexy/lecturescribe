@@ -85,6 +85,33 @@ pub fn open_output_folder(state: State<'_, AppState>) -> Result<String, AppError
 }
 
 #[tauri::command]
+pub fn open_job_output(job_id: String, state: State<'_, AppState>) -> Result<String, AppError> {
+    let snapshot = state.store.get_job_snapshot(&job_id)?;
+    let path = snapshot
+        .summary
+        .map(|summary| PathBuf::from(summary.output_dir))
+        .unwrap_or_else(|| {
+            PathBuf::from(
+                state
+                    .settings()
+                    .map(|value| value.output_dir)
+                    .unwrap_or_default(),
+            )
+        });
+    if path.as_os_str().is_empty() {
+        return Err(AppError::new(
+            "job_output_missing",
+            ErrorCategory::Filesystem,
+            "This run does not have an output folder yet.",
+            "The job snapshot and application settings did not contain an output path.",
+        ));
+    }
+    fs::create_dir_all(&path).map_err(filesystem_error)?;
+    open_path(&path, false)?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 pub fn open_artifact(
     job_id: String,
     item_id: String,

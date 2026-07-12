@@ -35,7 +35,7 @@ export function PasteLinksModal({
         <textarea
           autoFocus
           className="links-textarea"
-          onInput={(event: Event) => onChange((event.currentTarget as HTMLTextAreaElement).value)}
+          onInput={(event) => onChange(event.currentTarget.value)}
           placeholder="https://www.youtube.com/watch?v=...&#10;https://drive.google.com/file/d/..."
           value={value}
         />

@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, type ReactNode } from "react";
+import { useEffect, useId, useRef, type MouseEventHandler, type ReactNode } from "react";
 import { Icon, type IconName } from "./Icon";
 import type { ToastMessage } from "../state/app-state";
 
@@ -21,7 +21,7 @@ export function Button({
   disabled?: boolean;
   title?: string;
   type?: "button" | "submit";
-  onClick?: (event: MouseEvent) => void;
+  onClick?: MouseEventHandler<HTMLButtonElement>;
 }) {
   return (
     <button
@@ -48,7 +48,7 @@ export function IconButton({
 }: {
   icon: IconName;
   label: string;
-  onClick?: (event: MouseEvent) => void;
+  onClick?: MouseEventHandler<HTMLButtonElement>;
   disabled?: boolean;
   active?: boolean;
   danger?: boolean;
@@ -98,8 +98,24 @@ export function SegmentedControl<T extends string>({
           aria-checked={value === option.value}
           className={value === option.value ? "is-selected" : ""}
           key={option.value}
+          onKeyDown={(event) => {
+            const currentIndex = options.findIndex((item) => item.value === option.value);
+            const keys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"];
+            if (!keys.includes(event.key)) return;
+            event.preventDefault();
+            const last = options.length - 1;
+            const nextIndex = event.key === "Home"
+              ? 0
+              : event.key === "End"
+                ? last
+                : (currentIndex + (event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1) + options.length) % options.length;
+            onChange(options[nextIndex].value);
+            const buttons = event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]');
+            buttons?.[nextIndex]?.focus();
+          }}
           onClick={() => onChange(option.value)}
           role="radio"
+          tabIndex={value === option.value ? 0 : -1}
           title={option.hint}
           type="button"
         >
@@ -115,8 +131,8 @@ export function ProgressBar({ value, label }: { value: number; label: string }) 
   return (
     <div
       aria-label={label}
-      aria-valuemax="100"
-      aria-valuemin="0"
+      aria-valuemax={100}
+      aria-valuemin={0}
       aria-valuenow={Math.round(safe)}
       className="progress-track"
       role="progressbar"
@@ -159,7 +175,7 @@ export function Modal({
       aria-describedby={description ? descriptionId : undefined}
       aria-labelledby={titleId}
       className={`modal modal-${size}`}
-      onCancel={(event: Event) => {
+      onCancel={(event) => {
         event.preventDefault();
         onClose();
       }}
@@ -202,7 +218,7 @@ export function Drawer({
     <dialog
       aria-labelledby={titleId}
       className="drawer"
-      onCancel={(event: Event) => {
+      onCancel={(event) => {
         event.preventDefault();
         onClose();
       }}
@@ -258,7 +274,7 @@ export function Toggle({
       </span>
       <input
         checked={checked}
-        onChange={(event: Event) => onChange((event.currentTarget as HTMLInputElement).checked)}
+        onChange={(event) => onChange(event.currentTarget.checked)}
         type="checkbox"
       />
     </label>

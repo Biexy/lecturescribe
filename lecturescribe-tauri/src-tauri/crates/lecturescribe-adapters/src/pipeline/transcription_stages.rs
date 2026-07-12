@@ -32,7 +32,15 @@ impl PipelineExecutor {
             control.checkpoint()?;
             let path = transcript_dir.join(format!("segment_{:04}.json", descriptor.index));
             let transcript = match read_cached_segment(&path, &config_hash, &descriptor.checksum) {
-                Some(transcript) if !settings.force => transcript,
+                Some(cached)
+                    if cached_segment_allowed(
+                        settings.force,
+                        &context.job_id,
+                        cached.job_id.as_deref(),
+                    ) =>
+                {
+                    cached.transcript
+                }
                 _ => {
                     let result = self.gemini.transcribe_segment(
                         descriptor,
@@ -51,9 +59,10 @@ impl PipelineExecutor {
                     atomic_write_json(
                         &path,
                         &CachedSegmentTranscript {
-                            schema_version: 1,
+                            schema_version: 3,
                             config_hash: config_hash.clone(),
                             segment_checksum: descriptor.checksum.clone(),
+                            job_id: Some(context.job_id.clone()),
                             transcript: transcript.clone(),
                         },
                     )?;
@@ -146,7 +155,7 @@ impl PipelineExecutor {
             reporter,
         )?;
         let mut all = Vec::new();
-        let mut language = "unknown".to_string();
+        let mut languages = Vec::new();
         for mut child in manifest.segments {
             child.start_seconds += descriptor.start_seconds;
             child.end_seconds =
@@ -158,13 +167,19 @@ impl PipelineExecutor {
                 control,
                 reporter,
             )?;
-            if transcript.language != "unknown" {
-                language = transcript.language.clone();
+            for language in &transcript.languages {
+                if !languages.contains(language) {
+                    languages.push(language.clone());
+                }
             }
             all.extend(transcript.segments);
         }
+        if languages.is_empty() {
+            languages.push("und".to_string());
+        }
         Ok(SegmentTranscript {
-            language,
+            language: languages[0].clone(),
+            languages,
             segments: all,
         })
     }
@@ -202,13 +217,26 @@ impl PipelineExecutor {
         context: &TaskContext,
         control: &JobControl,
     ) -> Result<TaskExecutionResult, AppError> {
-        let document = merge_transcripts(
+        let transcripts = self.load_segment_transcripts(context)?;
+        let mut languages = Vec::new();
+        for transcript in &transcripts {
+            for language in &transcript.languages {
+                if !languages.contains(language) {
+                    languages.push(language.clone());
+                }
+            }
+        }
+        if languages.is_empty() {
+            languages.push("und".to_string());
+        }
+        let mut document = merge_transcripts(
             &context.item.item.id,
             &context.item.item.title,
             &context.item.item.source,
             &context.plan.settings.model,
-            self.load_segment_transcripts(context)?,
+            transcripts,
         )?;
+        document.languages = languages;
         let path = canonical_path(&self.item_work_dir(context));
         atomic_write_json(&path, &document)?;
         let checksum = sha256_file(&path, control)?;
@@ -252,14 +280,16 @@ impl PipelineExecutor {
             .iter()
             .map(|segment| {
                 let path = directory.join(format!("segment_{:04}.json", segment.index));
-                read_cached_segment(&path, &config_hash, &segment.checksum).ok_or_else(|| {
-                    AppError::new(
-                        "segment_transcript_cache_invalid",
-                        ErrorCategory::Transcription,
-                        "A segment transcript is missing or does not match this run.",
-                        path.display().to_string(),
-                    )
-                })
+                read_cached_segment(&path, &config_hash, &segment.checksum)
+                    .map(|cached| cached.transcript)
+                    .ok_or_else(|| {
+                        AppError::new(
+                            "segment_transcript_cache_invalid",
+                            ErrorCategory::Transcription,
+                            "A segment transcript is missing or does not match this run.",
+                            path.display().to_string(),
+                        )
+                    })
             })
             .collect()
     }
@@ -270,6 +300,8 @@ struct CachedSegmentTranscript {
     schema_version: u16,
     config_hash: String,
     segment_checksum: String,
+    #[serde(default)]
+    job_id: Option<String>,
     transcript: SegmentTranscript,
 }
 
@@ -277,13 +309,17 @@ fn read_cached_segment(
     path: &Path,
     config_hash: &str,
     segment_checksum: &str,
-) -> Option<SegmentTranscript> {
+) -> Option<CachedSegmentTranscript> {
     let value: CachedSegmentTranscript =
         serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
-    (value.schema_version == 1
+    (value.schema_version == 3
         && value.config_hash == config_hash
         && value.segment_checksum == segment_checksum)
-        .then_some(value.transcript)
+        .then_some(value)
+}
+
+fn cached_segment_allowed(force: bool, current_job_id: &str, cached_job_id: Option<&str>) -> bool {
+    !force || cached_job_id == Some(current_job_id)
 }
 
 fn should_split_after_error(error: &AppError) -> bool {
@@ -294,4 +330,17 @@ fn should_split_after_error(error: &AppError) -> bool {
             | "transcript_schema_invalid"
             | "transcript_timestamp_out_of_range"
     )
+}
+
+#[cfg(test)]
+mod cache_policy_tests {
+    use super::cached_segment_allowed;
+
+    #[test]
+    fn force_reuses_only_checkpoints_from_the_current_job() {
+        assert!(cached_segment_allowed(true, "job-2", Some("job-2")));
+        assert!(!cached_segment_allowed(true, "job-2", Some("job-1")));
+        assert!(!cached_segment_allowed(true, "job-2", None));
+        assert!(cached_segment_allowed(false, "job-2", Some("job-1")));
+    }
 }

@@ -6,7 +6,7 @@ export default defineConfig({
     target: "es2022",
   },
   optimizeDeps: {
-    include: ["react", "react/jsx-runtime", "react-reconciler", "scheduler"],
+    include: ["react", "react-dom", "react/jsx-runtime"],
   },
   server: {
     host: "127.0.0.1",

@@ -1,6 +1,33 @@
 export type Theme = "light" | "dark";
 export type RunMode = "transcribe" | "download";
 export type TranscriptFormat = "text" | "markdown" | "srt" | "vtt";
+export type OutputPackage = "readable" | "subtitles" | "complete" | "custom";
+
+export interface LanguagePreferences {
+  mode: "auto" | "hints";
+  hints: string[];
+}
+
+export interface ModelOption {
+  id: string;
+  display_name: string;
+  description: string;
+  recommended: boolean;
+  quality_label: string;
+}
+
+export interface ModelValidation {
+  model_id: string;
+  availability: "available" | "unavailable" | "unknown";
+  status: "valid" | "invalid" | "unverified";
+  message: string;
+  checked_at: string | null;
+}
+
+export interface RunOverrides {
+  batch_name: string | null;
+  model_id: string | null;
+}
 export type SourceKind =
   | "pasted_link"
   | "text_file"
@@ -98,7 +125,8 @@ export interface AppSettings {
   model: string;
   theme: Theme;
   output_formats: TranscriptFormat[];
-  language: string;
+  language: LanguagePreferences;
+  output_package: OutputPackage;
   prompt_preset: string;
   additional_prompt: string;
   ffmpeg_path: string;
@@ -182,6 +210,7 @@ export interface TaskSpec {
 
 export interface PlannedItem {
   item: PreviewItem;
+  output_stem: string;
   ordinal: number;
   action: PlannedAction;
   reason: string;
@@ -193,9 +222,10 @@ export interface PlannedItem {
 export interface RunPlan {
   id: string;
   preview_id: string;
-  task_id: string;
   created_at: string;
   mode: RunMode;
+  batch_name: string;
+  batch_output_dir: string;
   settings: AppSettings;
   items: PlannedItem[];
   selected_count: number;
@@ -225,6 +255,30 @@ export interface ArtifactRecord {
   size_bytes: number;
   created_at: string;
   metadata: Record<string, string>;
+}
+
+export interface TranscriptSegment {
+  start_seconds: number;
+  end_seconds: number | null;
+  text: string;
+  language_code: string | null;
+}
+
+export interface SegmentTranscript {
+  language: string;
+  segments: TranscriptSegment[];
+}
+
+export interface TranscriptDocument {
+  schema_version: number;
+  item_id: string;
+  title: string;
+  source: string;
+  language: string;
+  languages: string[];
+  model: string;
+  generated_at: string;
+  segments: TranscriptSegment[];
 }
 
 export interface TaskSnapshot {
@@ -314,6 +368,19 @@ export interface ToolStatus {
   fix_action: string | null;
 }
 
+export interface CapabilityStatus {
+  ready: boolean;
+  blockers: AppError[];
+}
+
+export interface SetupCapabilities {
+  download_links: CapabilityStatus;
+  transcribe_local: CapabilityStatus;
+  transcribe_links: CapabilityStatus;
+}
+
+export type SetupCapability = keyof SetupCapabilities;
+
 export interface EnvironmentSnapshot {
   api_key_configured: boolean;
   api_key_verified: boolean;
@@ -325,6 +392,7 @@ export interface EnvironmentSnapshot {
   database_ok: boolean;
   network_online: boolean | null;
   app_version: string;
+  capabilities: SetupCapabilities;
   setup_complete: boolean;
   problems: AppError[];
 }

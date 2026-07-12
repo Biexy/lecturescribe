@@ -23,7 +23,7 @@ pub fn extract_urls(text: &str) -> Vec<String> {
         .map(|value| {
             value
                 .as_str()
-                .trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | ')' | ']' | '}'))
+                .trim_end_matches(['.', ',', ';', ':', ')', ']', '}'])
                 .to_string()
         })
         .filter(|value| Url::parse(value).is_ok())
@@ -302,5 +302,35 @@ mod tests {
             values,
             vec!["https://example.com/a", "https://youtu.be/abc123"]
         );
+    }
+
+    #[test]
+    fn sanitized_drive_link_file_yields_exactly_twenty_two_unique_items() {
+        let text = (1..=22)
+            .map(|index| {
+                format!(
+                    "{:02} - Sample\thttps://drive.google.com/file/d/TestFileId_{index:02}_AbC/view",
+                    index
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let urls = extract_urls(&text);
+        let source = SourceInput {
+            id: "sanitized-drive-fixture".to_string(),
+            kind: SourceKind::TextFile,
+            value: "sanitized-drive-links.txt".to_string(),
+            label: "Sanitized Drive links".to_string(),
+            automatic: false,
+        };
+        let values = urls
+            .into_iter()
+            .map(|url| (source.clone(), url))
+            .collect::<Vec<_>>();
+        let (items, duplicates) = inspect_source_values(&values);
+
+        assert_eq!(items.len(), 22);
+        assert_eq!(duplicates, 0);
+        assert!(items.iter().all(|item| item.selected));
     }
 }
